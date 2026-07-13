@@ -1,0 +1,15 @@
+com\major\cloud\config\CorsConfig.class
+com\major\cloud\scheduler\MonitoringScheduler.class
+com\major\cloud\service\MonitoringService.class
+com\major\cloud\controller\ExperimentController.class
+com\major\cloud\strategy\CpuStrategy.class
+com\major\cloud\model\ScalingEvent.class
+com\major\cloud\service\StrategyEngine.class
+com\major\cloud\CloudStrategySimulatorApplication.class
+com\major\cloud\strategy\LatencyStrategy.class
+com\major\cloud\service\ExperimentService.class
+com\major\cloud\model\ExperimentResult.class
+com\major\cloud\strategy\ScalingStrategy.class
+com\major\cloud\strategy\TrendStrategy.class
+com\major\cloud\service\MonitoringService$Workload.class
+com\major\cloud\service\ScalingService.class
