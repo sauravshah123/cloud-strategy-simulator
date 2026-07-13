@@ -1,5 +1,9 @@
 import { useState } from 'react';
 
+const API_URL = import.meta.env.VITE_API_URL
+  ? `https://${import.meta.env.VITE_API_URL}`
+  : 'http://localhost:8080';
+
 const strategyColors = {
   CPU: { bg: 'rgba(59,130,246,0.15)', border: '#3b82f6', text: '#93c5fd', badge: '#1d4ed8' },
   TREND: { bg: 'rgba(16,185,129,0.15)', border: '#10b981', text: '#6ee7b7', badge: '#065f46' },
@@ -31,7 +35,7 @@ function App() {
     setResult(null);
     setError(null);
     try {
-      const res = await fetch('http://localhost:8080/api/experiment', {
+      const res = await fetch(`${API_URL}/api/experiment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(['CPU', 'TREND', 'LATENCY']),

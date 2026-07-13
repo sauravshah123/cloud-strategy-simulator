@@ -1,0 +1,32 @@
+services:
+  # Spring Boot Backend
+  - type: web
+    name: cloud-strategy-simulator-api
+    runtime: java
+    rootDir: backend
+    buildCommand: mvn clean package -DskipTests
+    startCommand: java -jar target/cloud-strategy-simulator-0.0.1-SNAPSHOT.jar
+    envVars:
+      - key: JAVA_VERSION
+        value: 17
+      - key: SERVER_PORT
+        value: 8080
+    healthCheckPath: /actuator/health
+
+  # React Frontend
+  - type: web
+    name: cloud-strategy-simulator-ui
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: cloud-strategy-simulator-api
+          property: host
