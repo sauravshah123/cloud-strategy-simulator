@@ -1,10 +1,9 @@
 services:
-  # Spring Boot Backend — uses Docker since Render has no native Java runtime
+  # Spring Boot Backend — Docker runtime (Render has no native Java runtime)
   - type: web
     name: cloud-strategy-simulator-api
     runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: SERVER_PORT
         value: 8080
