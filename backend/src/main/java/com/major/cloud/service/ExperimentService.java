@@ -6,10 +6,7 @@ import com.major.cloud.strategy.ScalingStrategy;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 @Service
 @RequiredArgsConstructor
@@ -19,39 +16,62 @@ public class ExperimentService {
     private final ScalingService scalingService;
     private final MonitoringService monitoringService;
 
+    /** Legacy single-result method kept for compatibility */
     public ExperimentResult runExperiment(List<String> strategyNames) {
-        List<ExperimentResult> results = new ArrayList<>();
+        return (ExperimentResult) runExperimentDetailed(strategyNames).get("best");
+    }
 
-        // Capture REAL system workload wave (15 steps, 1s apart = ~15s of real data)
+    /** Full experiment: returns best + all strategy results + real system metrics */
+    public Map<String, Object> runExperimentDetailed(List<String> strategyNames) {
+        // Capture REAL system workload (15 one-second samples = 15 real seconds)
         List<MonitoringService.Workload> wave = monitoringService.generateTrafficWave(15);
 
-        // Compute real metric summaries across the wave
         double peakCpu = wave.stream().mapToDouble(w -> w.cpuUsage).max().orElse(0);
         double peakMem = wave.stream().mapToDouble(w -> w.memoryUsage).max().orElse(0);
         double avgCpu  = wave.stream().mapToDouble(w -> w.cpuUsage).average().orElse(0);
+        double avgMem  = wave.stream().mapToDouble(w -> w.memoryUsage).average().orElse(0);
+
+        List<Map<String, Object>> allResults = new ArrayList<>();
+        Map<String, Object> bestResult = null;
+        double bestLatency = Double.MAX_VALUE;
 
         for (String name : strategyNames) {
             ScalingStrategy strategy = strategyEngine.getStrategy(name);
-            if (strategy != null) {
-                results.add(simulateStrategy(strategy, wave, peakCpu, peakMem, avgCpu));
+            if (strategy == null) continue;
+
+            ExperimentResult r = simulateStrategy(strategy, wave, peakCpu, peakMem, avgCpu);
+
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("strategy",            r.getBestStrategy());
+            entry.put("finalReplicas",        r.getFinalReplicas());
+            entry.put("averageResponseTime",  r.getAverageResponseTime());
+            entry.put("scalingEvents",        r.getScalingEvents());
+            entry.put("scalingEventCount",    r.getScalingEvents().size());
+            allResults.add(entry);
+
+            if (r.getAverageResponseTime() < bestLatency) {
+                bestLatency = r.getAverageResponseTime();
+                bestResult  = entry;
             }
         }
 
-        if (results.isEmpty()) {
-            return new ExperimentResult("NONE", 0, 0, new ArrayList<>(), 0, 0, 0);
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("strategies",    allResults);
+        response.put("bestStrategy",  bestResult != null ? bestResult.get("strategy") : "NONE");
+        response.put("peakCpuUsage",  Math.round(peakCpu * 10.0) / 10.0);
+        response.put("peakMemUsage",  Math.round(peakMem * 10.0) / 10.0);
+        response.put("avgCpuUsage",   Math.round(avgCpu  * 10.0) / 10.0);
+        response.put("avgMemUsage",   Math.round(avgMem  * 10.0) / 10.0);
+        response.put("sampleCount",   wave.size());
+        response.put("timestamp",     System.currentTimeMillis());
+
+        // Also include legacy fields for backward compat
+        if (bestResult != null) {
+            response.put("finalReplicas",       bestResult.get("finalReplicas"));
+            response.put("averageResponseTime", bestResult.get("averageResponseTime"));
+            response.put("scalingEvents",       bestResult.get("scalingEvents"));
         }
-
-        ExperimentResult bestResult = results.stream()
-                .min(Comparator.comparingDouble(ExperimentResult::getAverageResponseTime))
-                .orElse(results.get(0));
-
-        String bestName = results.stream()
-                .min(Comparator.comparingDouble(ExperimentResult::getAverageResponseTime))
-                .map(r -> strategyNames.get(results.indexOf(r)))
-                .orElse("UNKNOWN");
-
-        bestResult.setBestStrategy(bestName);
-        return bestResult;
+        return response;
     }
 
     private ExperimentResult simulateStrategy(
@@ -64,14 +84,11 @@ public class ExperimentService {
         List<ScalingEvent> events = new ArrayList<>();
 
         for (MonitoringService.Workload w : wave) {
-            // Use REAL cpu reading for CPU strategy; derive latency from real memory pressure
-            double cpu     = w.cpuUsage;
             double latency = monitoringService.calculateLatency(w.trafficBase, replicas);
-            double trend   = w.trend;
-
             totalLatency += latency;
 
-            Optional<ScalingEvent> event = scalingService.applyStrategy(strategy, replicas, cpu, trend, latency);
+            Optional<ScalingEvent> event = scalingService.applyStrategy(
+                strategy, replicas, w.cpuUsage, w.trend, latency);
             if (event.isPresent()) {
                 events.add(event.get());
                 replicas = event.get().getNewReplicas();

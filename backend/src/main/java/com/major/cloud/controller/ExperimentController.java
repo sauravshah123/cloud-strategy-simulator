@@ -7,8 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.Map;
-import java.util.List;
+import java.util.*;
 
 @RestController
 @RequestMapping("/api")
@@ -18,21 +17,31 @@ public class ExperimentController {
     private final ExperimentService experimentService;
     private final MonitoringService monitoringService;
 
+    // In-memory experiment history (last 10 runs)
+    private final LinkedList<Map<String, Object>> history = new LinkedList<>();
+
     @PostMapping("/experiment")
-    public ResponseEntity<ExperimentResult> runExperiment(@RequestBody List<String> strategies) {
-        ExperimentResult result = experimentService.runExperiment(strategies);
-        return ResponseEntity.ok(result);
+    public ResponseEntity<Map<String, Object>> runExperiment(@RequestBody Map<String, Object> request) {
+        @SuppressWarnings("unchecked")
+        List<String> strategies = (List<String>) request.getOrDefault("strategies", List.of("CPU", "TREND", "LATENCY"));
+
+        // Run experiment and get all strategy results
+        Map<String, Object> response = experimentService.runExperimentDetailed(strategies);
+
+        // Save to history
+        Map<String, Object> historyEntry = new LinkedHashMap<>(response);
+        historyEntry.put("runAt", System.currentTimeMillis());
+        synchronized (history) {
+            if (history.size() >= 10) history.removeLast();
+            history.addFirst(historyEntry);
+        }
+        return ResponseEntity.ok(response);
     }
 
-    /** Live metrics endpoint — returns real CPU & memory right now (no experiment needed) */
-    @GetMapping("/metrics")
-    public ResponseEntity<Map<String, Object>> getLiveMetrics() {
-        double cpu = monitoringService.getRealCpuUsage();
-        double mem = monitoringService.getRealMemoryUsage();
-        return ResponseEntity.ok(Map.of(
-            "cpuUsage", Math.round(cpu * 10.0) / 10.0,
-            "memoryUsage", Math.round(mem * 10.0) / 10.0,
-            "status", cpu > 80 ? "HIGH" : cpu > 50 ? "MEDIUM" : "LOW"
-        ));
+    @GetMapping("/history")
+    public ResponseEntity<List<Map<String, Object>>> getHistory() {
+        synchronized (history) {
+            return ResponseEntity.ok(new ArrayList<>(history));
+        }
     }
 }
