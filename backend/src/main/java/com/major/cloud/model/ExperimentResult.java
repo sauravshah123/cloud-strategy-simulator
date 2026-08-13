@@ -14,4 +14,9 @@ public class ExperimentResult {
     private int finalReplicas;
     private double averageResponseTime;
     private List<ScalingEvent> scalingEvents;
+
+    // Real-time system metrics captured during the experiment
+    private double peakCpuUsage;
+    private double peakMemoryUsage;
+    private double avgCpuUsage;
 }

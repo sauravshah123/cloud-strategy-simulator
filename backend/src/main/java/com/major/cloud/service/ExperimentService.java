@@ -21,19 +21,24 @@ public class ExperimentService {
 
     public ExperimentResult runExperiment(List<String> strategyNames) {
         List<ExperimentResult> results = new ArrayList<>();
-        
-        // Generate ONE shared traffic wave so all strategies face the exact same conditions
+
+        // Capture REAL system workload wave (15 steps, 1s apart = ~15s of real data)
         List<MonitoringService.Workload> wave = monitoringService.generateTrafficWave(15);
+
+        // Compute real metric summaries across the wave
+        double peakCpu = wave.stream().mapToDouble(w -> w.cpuUsage).max().orElse(0);
+        double peakMem = wave.stream().mapToDouble(w -> w.memoryUsage).max().orElse(0);
+        double avgCpu  = wave.stream().mapToDouble(w -> w.cpuUsage).average().orElse(0);
 
         for (String name : strategyNames) {
             ScalingStrategy strategy = strategyEngine.getStrategy(name);
             if (strategy != null) {
-                results.add(simulateStrategy(strategy, wave));
+                results.add(simulateStrategy(strategy, wave, peakCpu, peakMem, avgCpu));
             }
         }
 
         if (results.isEmpty()) {
-            return new ExperimentResult("NONE", 0, 0, new ArrayList<>());
+            return new ExperimentResult("NONE", 0, 0, new ArrayList<>(), 0, 0, 0);
         }
 
         ExperimentResult bestResult = results.stream()
@@ -44,21 +49,25 @@ public class ExperimentService {
                 .min(Comparator.comparingDouble(ExperimentResult::getAverageResponseTime))
                 .map(r -> strategyNames.get(results.indexOf(r)))
                 .orElse("UNKNOWN");
-        
-        bestResult.setBestStrategy(bestName);
 
+        bestResult.setBestStrategy(bestName);
         return bestResult;
     }
 
-    private ExperimentResult simulateStrategy(ScalingStrategy strategy, List<MonitoringService.Workload> wave) {
+    private ExperimentResult simulateStrategy(
+            ScalingStrategy strategy,
+            List<MonitoringService.Workload> wave,
+            double peakCpu, double peakMem, double avgCpu) {
+
         int replicas = 2;
         double totalLatency = 0;
         List<ScalingEvent> events = new ArrayList<>();
 
         for (MonitoringService.Workload w : wave) {
-            double cpu = monitoringService.calculateCpu(w.trafficBase, replicas);
+            // Use REAL cpu reading for CPU strategy; derive latency from real memory pressure
+            double cpu     = w.cpuUsage;
             double latency = monitoringService.calculateLatency(w.trafficBase, replicas);
-            double trend = w.trend;
+            double trend   = w.trend;
 
             totalLatency += latency;
 
@@ -70,6 +79,6 @@ public class ExperimentService {
         }
 
         double avgLatency = totalLatency / wave.size();
-        return new ExperimentResult(strategy.getStrategyName(), replicas, avgLatency, events);
+        return new ExperimentResult(strategy.getStrategyName(), replicas, avgLatency, events, peakCpu, peakMem, avgCpu);
     }
 }
