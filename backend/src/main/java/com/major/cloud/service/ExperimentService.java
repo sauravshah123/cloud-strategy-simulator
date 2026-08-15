@@ -24,7 +24,7 @@ public class ExperimentService {
     /** Full experiment: returns best + all strategy results + real system metrics */
     public Map<String, Object> runExperimentDetailed(List<String> strategyNames) {
         // Capture REAL system workload (15 one-second samples = 15 real seconds)
-        List<MonitoringService.Workload> wave = monitoringService.generateTrafficWave(15);
+        List<MonitoringService.Workload> wave = monitoringService.generateTrafficWave(10);
 
         double peakCpu = wave.stream().mapToDouble(w -> w.cpuUsage).max().orElse(0);
         double peakMem = wave.stream().mapToDouble(w -> w.memoryUsage).max().orElse(0);
