@@ -212,7 +212,7 @@ export default function App() {
     try {
       const res = await fetch(`${API_URL}/api/experiment`, {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ strategies:['CPU','TREND','LATENCY'] }),
+        body: JSON.stringify(['CPU', 'TREND', 'LATENCY']),
       });
       clearInterval(progRef.current); setProg(100);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

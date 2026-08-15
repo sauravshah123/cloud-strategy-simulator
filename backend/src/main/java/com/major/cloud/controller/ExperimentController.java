@@ -21,11 +21,7 @@ public class ExperimentController {
     private final LinkedList<Map<String, Object>> history = new LinkedList<>();
 
     @PostMapping("/experiment")
-    public ResponseEntity<Map<String, Object>> runExperiment(@RequestBody Map<String, Object> request) {
-        @SuppressWarnings("unchecked")
-        List<String> strategies = (List<String>) request.getOrDefault("strategies", List.of("CPU", "TREND", "LATENCY"));
-
-        // Run experiment and get all strategy results
+    public ResponseEntity<Map<String, Object>> runExperiment(@RequestBody List<String> strategies) {
         Map<String, Object> response = experimentService.runExperimentDetailed(strategies);
 
         // Save to history
