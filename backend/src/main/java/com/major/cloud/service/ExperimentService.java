@@ -4,10 +4,12 @@ import com.major.cloud.model.ExperimentResult;
 import com.major.cloud.model.ScalingEvent;
 import com.major.cloud.strategy.ScalingStrategy;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class ExperimentService {
@@ -15,38 +17,28 @@ public class ExperimentService {
     private final StrategyEngine strategyEngine;
     private final ScalingService scalingService;
     private final MonitoringService monitoringService;
-
-    public ExperimentResult runExperiment(List<String> strategyNames) {
-        Map<String, Object> d = runExperimentDetailed(strategyNames);
-        @SuppressWarnings("unchecked")
-        List<Map<String,Object>> strats = (List<Map<String,Object>>) d.get("strategies");
-        if (strats == null || strats.isEmpty())
-            return new ExperimentResult("NONE", 0, 0, new ArrayList<>(), 0, 0, 0);
-        Map<String,Object> best = strats.get(0);
-        @SuppressWarnings("unchecked")
-        List<ScalingEvent> evts = (List<ScalingEvent>) best.get("scalingEvents");
-        return new ExperimentResult(
-            (String) d.get("bestStrategy"),
-            (Integer) best.get("finalReplicas"),
-            (Double) best.get("averageResponseTime"),
-            evts,
-            ((Number) d.get("peakCpuUsage")).doubleValue(),
-            ((Number) d.get("peakMemUsage")).doubleValue(),
-            ((Number) d.get("avgCpuUsage")).doubleValue()
-        );
-    }
+    private final DockerOrchestrationService dockerOrchestrationService;
+    private final SelfHealingService selfHealingService;
 
     /** Full experiment — returns timeline data per step for charting */
-    public Map<String, Object> runExperimentDetailed(List<String> strategyNames) {
-        // Sample real system metrics (10 one-second snapshots)
-        List<MonitoringService.Workload> wave = monitoringService.generateTrafficWave(10);
+    public Map<String, Object> runExperimentDetailed(List<String> strategyNames, String dockerImage) {
+        boolean useDocker = dockerImage != null && !dockerImage.trim().isEmpty();
+        
+        if (useDocker) {
+            log.info("Starting Docker-based experiment with image: {}", dockerImage);
+            dockerOrchestrationService.pullImage(dockerImage);
+            selfHealingService.clearEvents();
+        }
+
+        // Increase sample size to 30 for docker to allow time for containers to start/stop
+        int samples = useDocker ? 30 : 10;
+        List<MonitoringService.Workload> wave = monitoringService.generateTrafficWave(samples);
 
         double peakCpu = wave.stream().mapToDouble(w -> w.cpuUsage).max().orElse(0);
         double peakMem = wave.stream().mapToDouble(w -> w.memoryUsage).max().orElse(0);
         double avgCpu  = wave.stream().mapToDouble(w -> w.cpuUsage).average().orElse(0);
         double avgMem  = wave.stream().mapToDouble(w -> w.memoryUsage).average().orElse(0);
 
-        // Build per-step CPU and memory timeline arrays for the chart
         List<Double> cpuTimeline = new ArrayList<>();
         List<Double> memTimeline = new ArrayList<>();
         for (MonitoringService.Workload w : wave) {
@@ -58,21 +50,26 @@ public class ExperimentService {
         Map<String, Object> bestResult = null;
         double bestLatency = Double.MAX_VALUE;
 
-        for (String name : strategyNames) {
-            ScalingStrategy strategy = strategyEngine.getStrategy(name);
-            if (strategy == null) continue;
+        try {
+            for (String name : strategyNames) {
+                ScalingStrategy strategy = strategyEngine.getStrategy(name);
+                if (strategy == null) continue;
 
-            Map<String, Object> entry = simulateStrategyDetailed(strategy, wave, peakCpu, peakMem, avgCpu);
-            allResults.add(entry);
+                Map<String, Object> entry = simulateStrategyDetailed(strategy, wave, useDocker, dockerImage);
+                allResults.add(entry);
 
-            double lat = (double) entry.get("averageResponseTime");
-            if (lat < bestLatency) {
-                bestLatency = lat;
-                bestResult  = entry;
+                double lat = (double) entry.get("averageResponseTime");
+                if (lat < bestLatency) {
+                    bestLatency = lat;
+                    bestResult  = entry;
+                }
+            }
+        } finally {
+            if (useDocker) {
+                dockerOrchestrationService.cleanupAll();
             }
         }
 
-        // Sort by latency ascending
         allResults.sort(Comparator.comparingDouble(e -> (double) e.get("averageResponseTime")));
 
         Map<String, Object> response = new LinkedHashMap<>();
@@ -84,10 +81,10 @@ public class ExperimentService {
         response.put("avgMemUsage",   Math.round(avgMem  * 10.0) / 10.0);
         response.put("sampleCount",   wave.size());
         response.put("timestamp",     System.currentTimeMillis());
-        response.put("cpuTimeline",   cpuTimeline);   // per-step CPU readings
-        response.put("memTimeline",   memTimeline);   // per-step memory readings
+        response.put("cpuTimeline",   cpuTimeline);
+        response.put("memTimeline",   memTimeline);
+        response.put("dockerImage",   dockerImage);
 
-        // Legacy fields for backward compat
         if (bestResult != null) {
             response.put("finalReplicas",       bestResult.get("finalReplicas"));
             response.put("averageResponseTime", bestResult.get("averageResponseTime"));
@@ -99,15 +96,32 @@ public class ExperimentService {
     private Map<String, Object> simulateStrategyDetailed(
             ScalingStrategy strategy,
             List<MonitoringService.Workload> wave,
-            double peakCpu, double peakMem, double avgCpu) {
+            boolean useDocker, String dockerImage) {
 
         int replicas = 2;
+        String stratName = strategy.getStrategyName();
+        
+        if (useDocker) {
+            // Start initial replicas
+            for (int i = 0; i < replicas; i++) {
+                dockerOrchestrationService.startContainer(stratName, dockerImage);
+            }
+        }
+
         double totalLatency = 0;
         List<ScalingEvent> events = new ArrayList<>();
-        List<Integer> replicaTimeline = new ArrayList<>();  // replicas at each step
-        List<Double>  latencyTimeline = new ArrayList<>();  // latency at each step
+        List<Integer> replicaTimeline = new ArrayList<>();
+        List<Double>  latencyTimeline = new ArrayList<>();
 
         for (MonitoringService.Workload w : wave) {
+            
+            if (useDocker) {
+                selfHealingService.checkAndHeal(stratName, dockerImage);
+                // Adjust replicas based on actual running containers
+                replicas = dockerOrchestrationService.getActiveContainers(stratName).size();
+                if (replicas == 0) replicas = 1; // avoid division by zero
+            }
+
             double latency = monitoringService.calculateLatency(w.trafficBase, replicas);
             totalLatency += latency;
             replicaTimeline.add(replicas);
@@ -115,22 +129,46 @@ public class ExperimentService {
 
             Optional<ScalingEvent> event = scalingService.applyStrategy(
                 strategy, replicas, w.cpuUsage, w.trend, latency);
+                
             if (event.isPresent()) {
-                events.add(event.get());
-                replicas = event.get().getNewReplicas();
+                ScalingEvent e = event.get();
+                events.add(e);
+                int targetReplicas = e.getNewReplicas();
+                
+                if (useDocker) {
+                    if (targetReplicas > replicas) {
+                        for (int i = 0; i < (targetReplicas - replicas); i++) {
+                            dockerOrchestrationService.startContainer(stratName, dockerImage);
+                        }
+                    } else if (targetReplicas < replicas) {
+                        for (int i = 0; i < (replicas - targetReplicas); i++) {
+                            dockerOrchestrationService.stopContainer(stratName);
+                        }
+                    }
+                }
+                replicas = targetReplicas;
             }
+        }
+
+        if (useDocker) {
+            // Add healing events
+            List<ScalingEvent> heals = selfHealingService.getHealingEvents(stratName);
+            events.addAll(heals);
+            // Sort combined events
+            events.sort(Comparator.comparing(ScalingEvent::getTimestamp));
         }
 
         double avgLatency = totalLatency / wave.size();
 
         Map<String, Object> entry = new LinkedHashMap<>();
-        entry.put("strategy",           strategy.getStrategyName());
+        entry.put("strategy",            stratName);
         entry.put("finalReplicas",       replicas);
         entry.put("averageResponseTime", Math.round(avgLatency * 10.0) / 10.0);
         entry.put("scalingEvents",       events);
         entry.put("scalingEventCount",   events.size());
-        entry.put("replicaTimeline",     replicaTimeline);  // NEW: per-step replica counts
-        entry.put("latencyTimeline",     latencyTimeline);  // NEW: per-step latency values
+        entry.put("healingEventCount",   useDocker ? selfHealingService.getHealingEvents(stratName).size() : 0);
+        entry.put("replicaTimeline",     replicaTimeline);
+        entry.put("latencyTimeline",     latencyTimeline);
         return entry;
     }
 }

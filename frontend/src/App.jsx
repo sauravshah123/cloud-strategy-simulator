@@ -147,6 +147,7 @@ export default function App() {
   const [error,     setError]   = useState(null);
   const [tab,       setTab]     = useState('monitor');
   const [loadActive,setLoadAct] = useState(false);
+  const [dockerImg, setDocker]  = useState('');
   const sseRef  = useRef(null);
   const progRef = useRef(null);
 
@@ -205,14 +206,18 @@ export default function App() {
   const run = async () => {
     setLoad(true); setError(null); setProg(0);
     let step = 0;
+    const duration = dockerImg ? 30 : 10;
     progRef.current = setInterval(() => {
       step++;
-      setProg(Math.min(95, Math.round((step / 10) * 100)));
+      setProg(Math.min(95, Math.round((step / duration) * 100)));
     }, 1000);
     try {
+      const payload = { strategies:['CPU','TREND','LATENCY'] };
+      if (dockerImg) payload.dockerImage = dockerImg;
+
       const res = await fetch(`${API_URL}/api/experiment`, {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(['CPU', 'TREND', 'LATENCY']),
+        body: JSON.stringify(payload),
       });
       clearInterval(progRef.current); setProg(100);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -231,6 +236,16 @@ export default function App() {
       const r = await fetch(url, { method:'POST' });
       if (r.ok) { const d = await r.json(); setLoadAct(d.status === 'STARTED'); }
     } catch (e) { setError('Load generator failed: ' + e.message); }
+  };
+  
+  // ── Chaos Crash ───────────────────────────────────────
+  const crashContainer = async () => {
+    try {
+      const r = await fetch(`${API_URL}/api/chaos/crash?strategy=CPU`, { method:'POST' });
+      const data = await r.json();
+      if (r.ok) alert(data.message);
+      else alert("Chaos failed: " + data.message);
+    } catch (e) { alert('Chaos API failed: ' + e.message); }
   };
 
   const exportJSON = () => {
@@ -399,11 +414,18 @@ export default function App() {
 
             {/* CTA */}
             {connected && !loading && (
-              <div style={{ textAlign:'center' }}>
+              <div style={{ textAlign:'center', display:'flex', flexDirection:'column', alignItems:'center', gap:'12px' }}>
+                <div style={{ background:'rgba(8,13,26,0.6)', border:'1px solid #1e293b', padding:'12px 20px', borderRadius:'12px', display:'flex', alignItems:'center', gap:'12px', flexWrap:'wrap', justifyContent:'center' }}>
+                  <span style={{ fontSize:'13px', color:'#94a3b8', fontWeight:600 }}>🐳 Run on Docker:</span>
+                  <input type="text" placeholder="e.g. nginx:alpine (leave blank for fast host run)" value={dockerImg} onChange={e=>setDocker(e.target.value)}
+                    style={{ padding:'8px 14px', borderRadius:'8px', border:'1px solid #334155', background:'#060b14', color:'#e2e8f0', fontSize:'13px', width:'280px', outline:'none' }}/>
+                  {dockerImg && <button onClick={crashContainer} style={{ padding:'8px 14px', background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.3)', borderRadius:'8px', color:'#fca5a5', fontSize:'12px', fontWeight:700, cursor:'pointer' }}>💥 Chaos Crash (Test Healing)</button>}
+                </div>
+                
                 <button onClick={run} style={{ padding:'14px 36px', fontWeight:800, fontSize:'14px', color:'#fff', background:'linear-gradient(135deg,#3b82f6,#6366f1)', border:'none', borderRadius:'12px', cursor:'pointer', boxShadow:'0 6px 26px rgba(99,102,241,0.45)', transition:'transform 0.15s,box-shadow 0.15s' }}
                   onMouseEnter={e=>{e.currentTarget.style.transform='translateY(-2px)';e.currentTarget.style.boxShadow='0 10px 34px rgba(99,102,241,0.55)';}}
                   onMouseLeave={e=>{e.currentTarget.style.transform='translateY(0)';e.currentTarget.style.boxShadow='0 6px 26px rgba(99,102,241,0.45)';}}>
-                  ▶ Run Experiment (~10s)
+                  ▶ Run Experiment {dockerImg ? '(~30s)' : '(~10s)'}
                 </button>
                 <p style={{ marginTop:'8px', fontSize:'12px', color:'#1e293b' }}>
                   💡 Tip: Click <b style={{ color:'#fca5a5' }}>⚡ Generate Load</b> first to make CPU spike, then run the experiment for dramatic results!
