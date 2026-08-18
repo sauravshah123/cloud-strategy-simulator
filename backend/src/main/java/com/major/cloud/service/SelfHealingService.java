@@ -17,10 +17,10 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SelfHealingService {
 
     private final DockerOrchestrationService dockerOrchestrationService;
-    
+
     // Store healing events per strategy for the current experiment
     private final Map<String, List<ScalingEvent>> healingEvents = new ConcurrentHashMap<>();
-    
+
     public void clearEvents() {
         healingEvents.clear();
     }
@@ -29,28 +29,39 @@ public class SelfHealingService {
         return healingEvents.getOrDefault(strategyName, new ArrayList<>());
     }
 
-    public void checkAndHeal(String strategyName, String image) {
-        List<String> activeContainers = new ArrayList<>(dockerOrchestrationService.getActiveContainers(strategyName));
-        
+    /**
+     * Checks all active containers for the strategy and restarts any that
+     * are no longer running (crashed). Returns the number of heals performed.
+     */
+    public int checkAndHeal(String strategyName, String image) {
+        if (!dockerOrchestrationService.isDockerAvailable()) return 0;
+
+        List<String> activeContainers = dockerOrchestrationService.getActiveContainers(strategyName);
+        int healed = 0;
+
         for (String containerId : activeContainers) {
             if (!dockerOrchestrationService.isRunning(containerId)) {
-                log.warn("Container {} for strategy {} is down! Initiating self-healing...", containerId, strategyName);
-                
-                // Remove dead container and start new one
+                log.warn("⚠️ SELF-HEAL: Container {} for strategy {} is down. Restarting...",
+                        containerId.substring(0, 8), strategyName);
+
+                int oldCount = dockerOrchestrationService.getActiveContainers(strategyName).size();
                 dockerOrchestrationService.stopSpecificContainer(strategyName, containerId);
-                String newContainerId = dockerOrchestrationService.startContainer(strategyName, image);
-                
-                if (newContainerId != null) {
+                String newId = dockerOrchestrationService.startContainer(strategyName, image);
+
+                if (newId != null) {
                     ScalingEvent event = new ScalingEvent(
                             strategyName,
-                            activeContainers.size(),
-                            activeContainers.size(), // Replicas remain the same, just replaced
+                            oldCount,
+                            oldCount, // replica count stays the same, just replaced
                             "SELF-HEAL: Replaced crashed container " + containerId.substring(0, 8),
                             LocalDateTime.now()
                     );
                     healingEvents.computeIfAbsent(strategyName, k -> new ArrayList<>()).add(event);
+                    healed++;
+                    log.info("✅ SELF-HEAL: Replacement container {} started.", newId.substring(0, 8));
                 }
             }
         }
+        return healed;
     }
 }

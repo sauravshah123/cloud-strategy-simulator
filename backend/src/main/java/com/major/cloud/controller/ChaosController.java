@@ -6,10 +6,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
@@ -18,40 +15,62 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/chaos")
 @RequiredArgsConstructor
-@Tag(name = "Chaos Engineering", description = "Simulate failures to test self-healing")
+@Tag(name = "Chaos Engineering", description = "Simulate container failures to test self-healing")
 public class ChaosController {
 
     private final DockerOrchestrationService dockerOrchestrationService;
 
     @PostMapping("/crash")
-    @Operation(summary = "Crash a container", description = "Randomly stops a container for the given strategy to trigger self-healing")
-    public ResponseEntity<Map<String, Object>> crashContainer(@RequestParam(defaultValue = "CPU") String strategy) {
-        List<String> activeContainers = dockerOrchestrationService.getActiveContainers(strategy);
-        
-        if (activeContainers.isEmpty()) {
-            return ResponseEntity.badRequest().body(Map.of(
-                    "status", "FAILED",
-                    "message", "No active containers found for strategy: " + strategy
+    @Operation(summary = "Crash a container", description = "Forcefully stops one container for the given strategy to trigger self-healing")
+    public ResponseEntity<Map<String, Object>> crashContainer(
+            @RequestParam(defaultValue = "CPU") String strategy) {
+
+        if (!dockerOrchestrationService.isDockerAvailable()) {
+            return ResponseEntity.ok(Map.of(
+                    "status",  "SKIPPED",
+                    "message", "Docker daemon is not available on this host. " +
+                               "Chaos engineering requires a Docker-enabled backend."
             ));
         }
 
-        // Pick the first one (or could be random)
-        String containerId = activeContainers.get(0);
-        
-        try {
-            // Forcefully stop the container to simulate a crash
-            log.info("CHAOS: Manually crashing container {}", containerId);
-            dockerOrchestrationService.stopSpecificContainer(strategy, containerId);
-            
+        List<String> containers = dockerOrchestrationService.getActiveContainers(strategy);
+        if (containers.isEmpty()) {
             return ResponseEntity.ok(Map.of(
-                    "status", "CRASHED",
-                    "containerId", containerId,
-                    "strategy", strategy,
-                    "message", "Successfully crashed container " + containerId.substring(0, 8) + ". Self-healer should detect this shortly."
+                    "status",  "NO_CONTAINERS",
+                    "message", "No active containers found for strategy '" + strategy +
+                               "'. Start an experiment with a Docker image first."
+            ));
+        }
+
+        String containerId = containers.get(0);
+        try {
+            log.warn("💥 CHAOS: Manually crashing container {} for strategy {}", containerId.substring(0, 8), strategy);
+            dockerOrchestrationService.stopSpecificContainer(strategy, containerId);
+            return ResponseEntity.ok(Map.of(
+                    "status",      "CRASHED",
+                    "containerId", containerId.substring(0, 12),
+                    "strategy",    strategy,
+                    "message",     "Crashed container " + containerId.substring(0, 8) +
+                                   ". Self-healer will detect this within 1-2 seconds and spin up a replacement."
             ));
         } catch (Exception e) {
-            log.error("Failed to execute chaos crash", e);
-            return ResponseEntity.internalServerError().body(Map.of("status", "ERROR", "message", e.getMessage()));
+            log.error("Chaos crash failed", e);
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "status",  "ERROR",
+                    "message", e.getMessage()
+            ));
         }
+    }
+
+    @GetMapping("/status")
+    @Operation(summary = "Docker & chaos status")
+    public ResponseEntity<Map<String, Object>> status() {
+        boolean available = dockerOrchestrationService.isDockerAvailable();
+        return ResponseEntity.ok(Map.of(
+                "dockerAvailable",   available,
+                "cpuContainers",     dockerOrchestrationService.getActiveContainers("CPU").size(),
+                "trendContainers",   dockerOrchestrationService.getActiveContainers("TREND").size(),
+                "latencyContainers", dockerOrchestrationService.getActiveContainers("LATENCY").size()
+        ));
     }
 }

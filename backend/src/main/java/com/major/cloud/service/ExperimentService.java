@@ -22,8 +22,15 @@ public class ExperimentService {
 
     /** Full experiment — returns timeline data per step for charting */
     public Map<String, Object> runExperimentDetailed(List<String> strategyNames, String dockerImage) {
-        boolean useDocker = dockerImage != null && !dockerImage.trim().isEmpty();
-        
+        // Only use Docker if: image provided AND Docker daemon is actually available
+        boolean useDocker = dockerImage != null
+                && !dockerImage.trim().isEmpty()
+                && dockerOrchestrationService.isDockerAvailable();
+
+        if (dockerImage != null && !dockerImage.trim().isEmpty() && !dockerOrchestrationService.isDockerAvailable()) {
+            log.warn("Docker image '{}' was requested but Docker is not available. Falling back to host-metrics simulation.", dockerImage);
+        }
+
         if (useDocker) {
             log.info("Starting Docker-based experiment with image: {}", dockerImage);
             dockerOrchestrationService.pullImage(dockerImage);
