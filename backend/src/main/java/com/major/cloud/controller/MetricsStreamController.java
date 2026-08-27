@@ -1,6 +1,8 @@
 package com.major.cloud.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.major.cloud.service.AlertService;
+import com.major.cloud.service.AuditLogService;
 import com.major.cloud.service.MonitoringService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
@@ -18,6 +20,8 @@ import java.util.concurrent.*;
 public class MetricsStreamController {
 
     private final MonitoringService monitoringService;
+    private final AlertService      alertService;
+    private final AuditLogService   auditLogService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Thread-safe set of active SSE clients
@@ -31,6 +35,8 @@ public class MetricsStreamController {
         scheduler.scheduleAtFixedRate(() -> {
             double cpu = monitoringService.getRealCpuUsage();
             double mem = monitoringService.getRealMemoryUsage();
+            // Evaluate alert rules against live metrics
+            alertService.evaluate(cpu, mem);
             Map<String, Object> payload = Map.of(
                 "timestamp",   Instant.now().toEpochMilli(),
                 "cpuUsage",    Math.round(cpu * 10.0) / 10.0,
