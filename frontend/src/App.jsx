@@ -148,8 +148,11 @@ export default function App() {
   const [tab,       setTab]     = useState('monitor');
   const [loadActive,setLoadAct] = useState(false);
   const [dockerImg, setDocker]  = useState('');
-  const sseRef  = useRef(null);
-  const progRef = useRef(null);
+  const [healEvents,setHealEvt] = useState([]);   // live healing feed
+  const [healStatus,setHealSt]  = useState(null); // engine status snapshot
+  const sseRef   = useRef(null);
+  const healRef  = useRef(null);
+  const progRef  = useRef(null);
 
   // ── SSE with poll fallback ────────────────────────────
   const push = d => {
@@ -202,6 +205,39 @@ export default function App() {
     fetch(`${API_URL}/api/history`).then(r=>r.json()).then(setHistory).catch(()=>{});
   }, [result]);
 
+  // ── Healing SSE subscription ──────────────────────────
+  const connectHealSSE = useCallback(() => {
+    if (healRef.current) healRef.current.close();
+    const es = new EventSource(`${API_URL}/api/healing/stream`);
+    es.addEventListener('healing', e => {
+      try {
+        const evt = JSON.parse(e.data);
+        setHealEvt(prev => [evt, ...prev].slice(0, 100));
+      } catch {}
+    });
+    es.addEventListener('status', e => {
+      try { setHealSt(JSON.parse(e.data)); } catch {}
+    });
+    es.onerror = () => { es.close(); setTimeout(connectHealSSE, 5000); };
+    healRef.current = es;
+  }, []);
+
+  useEffect(() => {
+    connectHealSSE();
+    return () => healRef.current?.close();
+  }, [connectHealSSE]);
+
+  // ── Poll healing status every 5s ──────────────────────
+  useEffect(() => {
+    const id = setInterval(async () => {
+      try {
+        const r = await fetch(`${API_URL}/api/healing/status`);
+        if (r.ok) setHealSt(await r.json());
+      } catch {}
+    }, 5000);
+    return () => clearInterval(id);
+  }, []);
+
   // ── Run experiment ────────────────────────────────────
   const run = async () => {
     setLoad(true); setError(null); setProg(0);
@@ -220,12 +256,26 @@ export default function App() {
         body: JSON.stringify(payload),
       });
       clearInterval(progRef.current); setProg(100);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+
+      // Always parse the body — it contains useful error details on 4xx/5xx
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        // Backend returns { error, message } on 400
+        const msg = data?.message || data?.error || `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      // Service-level errors returned as 200 (shouldn't happen after our fix, but be safe)
+      if (data?.error) throw new Error(data.message || data.error);
+
       setTimeout(() => { setResult(data); setTab('results'); setLoad(false); setProg(0); }, 400);
     } catch (e) {
       clearInterval(progRef.current); setLoad(false); setProg(0);
-      setError(e.message.includes('fetch') ? 'Cannot reach backend. Wait 30–60s for Render to wake up, then retry.' : `Error: ${e.message}`);
+      setError(
+        e.message.includes('fetch') || e.message.includes('Failed')
+          ? 'Cannot reach backend. Wait 30–60s for Render to wake up, then retry.'
+          : `Error: ${e.message}`
+      );
     }
   };
 
@@ -242,11 +292,28 @@ export default function App() {
   const crashContainer = async () => {
     try {
       const r = await fetch(`${API_URL}/api/chaos/crash?strategy=CPU`, { method:'POST' });
-      const data = await r.json();
-      if (r.ok) alert(data.message);
-      else alert("Chaos failed: " + data.message);
-    } catch (e) { alert('Chaos API failed: ' + e.message); }
+      const data = await r.json().catch(() => null);
+      if (!r.ok) {
+        // Real server error
+        setError('Chaos crash failed: ' + (data?.message || `HTTP ${r.status}`));
+        return;
+      }
+      const status  = data?.status  ?? 'UNKNOWN';
+      const message = data?.message ?? 'No details returned.';
+      if (status === 'CRASHED') {
+        alert(`✅ ${message}`);
+      } else if (status === 'SKIPPED') {
+        alert(`ℹ️ Docker not available on this host.\n\nRun the experiment with Docker enabled locally to test chaos/self-healing.`);
+      } else if (status === 'NO_CONTAINERS') {
+        alert(`⚠️ No containers found.\n\nFirst run an experiment with a Docker image (e.g. nginx:alpine), then trigger chaos.`);
+      } else {
+        alert(`${status}: ${message}`);
+      }
+    } catch (e) {
+      setError('Chaos API failed: ' + e.message);
+    }
   };
+
 
   const exportJSON = () => {
     if (!result) return;
@@ -282,8 +349,18 @@ export default function App() {
 
         {/* Tabs */}
         <div style={{ display:'flex', gap:'2px' }}>
-          {[['monitor','📡 Monitor'],['results','📊 Results'],['history','🕐 History']].map(([t,l])=>(
-            <button key={t} onClick={()=>setTab(t)} style={navBtn(tab===t)}>{l}</button>
+          {[
+            ['monitor','📡 Monitor'],
+            ['results','📊 Results'],
+            ['history','🕐 History'],
+            ['healing','🛡 Auto-Heal'],
+          ].map(([t,l])=>(
+            <button key={t} onClick={()=>setTab(t)} style={{
+              ...navBtn(tab===t),
+              ...(t==='healing' && healEvents.length > 0 ? { color:'#34d399' } : {})
+            }}>
+              {l}{t==='healing' && healEvents.length > 0 ? ` (${healEvents.length})` : ''}
+            </button>
           ))}
         </div>
 
@@ -620,12 +697,131 @@ export default function App() {
             }
           </>
         )}
+
+        {/* ──────────────────────────────────────────────── */}
+        {/* AUTO-HEAL TAB                                   */}
+        {/* ──────────────────────────────────────────────── */}
+        {tab === 'healing' && (
+          <>
+            {/* Engine status row */}
+            <div style={{ display:'flex', gap:'10px', flexWrap:'wrap', marginBottom:'18px' }}>
+              {[
+                { label:'Engine',    value: healStatus?.active ? 'ARMED' : 'STANDBY', color: healStatus?.active ? '#34d399' : '#475569', icon:'🛡' },
+                { label:'Mode',      value: healStatus?.mode ?? 'SIMULATED',           color: healStatus?.mode==='DOCKER' ? '#60a5fa' : '#f59e0b', icon:'🐳' },
+                { label:'Heals',     value: healStatus?.totalHeals ?? healEvents.length, color:'#a78bfa', icon:'🔧' },
+                { label:'Watching',  value: `${healStatus?.subscribers ?? 0} clients`,  color:'#34d399', icon:'👁' },
+              ].map(c => (
+                <div key={c.label} style={{ background:'rgba(8,13,26,0.9)', border:`1px solid ${c.color}20`, borderRadius:'11px', padding:'14px 18px', flex:'1 1 130px' }}>
+                  <p style={{ fontSize:'11px', color:'#475569', textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:'6px' }}>{c.icon} {c.label}</p>
+                  <p style={{ fontSize:'20px', fontWeight:900, color:c.color }}>{c.value}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Arm / Chaos controls */}
+            <div style={{ background:'rgba(8,13,26,0.7)', border:'1px solid #1e293b', borderRadius:'13px', padding:'16px 20px', marginBottom:'18px', display:'flex', gap:'10px', flexWrap:'wrap', alignItems:'center' }}>
+              <span style={{ fontSize:'13px', color:'#94a3b8', fontWeight:600 }}>🛡 Control Panel</span>
+              <button onClick={async () => {
+                const img = dockerImg || '';
+                await fetch(`${API_URL}/api/healing/arm?image=${encodeURIComponent(img)}`, { method:'POST' });
+                const r = await fetch(`${API_URL}/api/healing/status`);
+                if (r.ok) setHealSt(await r.json());
+              }} style={{ padding:'8px 16px', background:'rgba(52,211,153,0.1)', border:'1px solid rgba(52,211,153,0.3)', borderRadius:'8px', color:'#34d399', fontSize:'12px', fontWeight:700, cursor:'pointer' }}>
+                ⚡ Arm Engine {dockerImg ? `(${dockerImg})` : '(Simulation)'}
+              </button>
+              <button onClick={async () => {
+                await fetch(`${API_URL}/api/healing/disarm`, { method:'POST' });
+                const r = await fetch(`${API_URL}/api/healing/status`);
+                if (r.ok) setHealSt(await r.json());
+              }} style={{ padding:'8px 16px', background:'rgba(239,68,68,0.08)', border:'1px solid rgba(239,68,68,0.25)', borderRadius:'8px', color:'#fca5a5', fontSize:'12px', fontWeight:700, cursor:'pointer' }}>
+                🔴 Disarm
+              </button>
+              <button onClick={async () => {
+                const r = await fetch(`${API_URL}/api/healing/chaos?strategy=CPU`, { method:'POST' });
+                const d = await r.json().catch(() => ({}));
+                alert(d.message || 'Chaos injected!');
+              }} style={{ padding:'8px 16px', background:'rgba(245,158,11,0.1)', border:'1px solid rgba(245,158,11,0.3)', borderRadius:'8px', color:'#fbbf24', fontSize:'12px', fontWeight:700, cursor:'pointer' }}>
+                💥 Inject Crash (CPU)
+              </button>
+              <button onClick={() => setHealEvt([])} style={{ marginLeft:'auto', padding:'6px 12px', background:'transparent', border:'1px solid #1e293b', borderRadius:'7px', color:'#334155', fontSize:'11px', cursor:'pointer' }}>
+                Clear Log
+              </button>
+            </div>
+
+            {/* How it works explanation */}
+            <div style={{ background:'rgba(52,211,153,0.04)', border:'1px solid rgba(52,211,153,0.15)', borderRadius:'12px', padding:'14px 18px', marginBottom:'18px' }}>
+              <p style={{ fontSize:'12px', color:'#34d399', fontWeight:700, marginBottom:'6px' }}>🛡 How Auto-Healing Works</p>
+              <p style={{ fontSize:'12px', color:'#475569', lineHeight:1.8 }}>
+                The engine runs a health check every <b style={{ color:'#94a3b8' }}>3 seconds</b>.
+                In <b style={{ color:'#60a5fa' }}>Docker mode</b>, it inspects real containers and restarts any that have stopped.
+                In <b style={{ color:'#f59e0b' }}>Simulation mode</b> (when Docker is unavailable), it models a <b style={{ color:'#94a3b8' }}>4% per-container crash rate</b> and auto-recovers. All events are pushed to this page via SSE in real-time.
+              </p>
+            </div>
+
+            {/* Live healing event feed */}
+            <h3 style={{ fontSize:'12px', fontWeight:700, color:'#1e293b', textTransform:'uppercase', letterSpacing:'0.07em', marginBottom:'10px' }}>
+              🔧 Live Healing Feed — {healEvents.length} events
+            </h3>
+
+            {healEvents.length === 0 ? (
+              <div style={{ textAlign:'center', padding:'50px 20px', color:'#1e293b' }}>
+                <div style={{ fontSize:'40px', marginBottom:'10px' }}>🛡</div>
+                <p style={{ marginBottom:'8px', fontWeight:600 }}>No healing events yet.</p>
+                <p style={{ fontSize:'12px' }}>Click <b style={{ color:'#34d399' }}>⚡ Arm Engine</b> then wait — or click <b style={{ color:'#fbbf24' }}>💥 Inject Crash</b> to trigger one immediately.</p>
+              </div>
+            ) : (
+              <div style={{ display:'flex', flexDirection:'column', gap:'8px' }}>
+                {healEvents.map((evt, i) => {
+                  const m = STRAT[evt.strategy] || STRAT.CPU;
+                  const isDocker = evt.mode === 'DOCKER';
+                  return (
+                    <div key={i} style={{
+                      background: i === 0 ? `${m.color}0a` : 'rgba(8,13,26,0.7)',
+                      border:`1px solid ${i === 0 ? m.color + '40' : '#0f172a'}`,
+                      borderRadius:'11px', padding:'13px 17px',
+                      display:'flex', alignItems:'center', gap:'12px', flexWrap:'wrap',
+                      animation: i === 0 ? 'fadeIn 0.5s ease' : 'none',
+                      transition:'all 0.3s'
+                    }}>
+                      {/* Heal icon */}
+                      <div style={{ width:'34px', height:'34px', borderRadius:'8px', background:`${m.color}15`, border:`1px solid ${m.color}30`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'18px', flexShrink:0 }}>
+                        🔧
+                      </div>
+                      <div style={{ flex:1, minWidth:'180px' }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'3px', flexWrap:'wrap' }}>
+                          <span style={{ fontSize:'12px', fontWeight:700, color:m.light }}>{evt.strategy} Strategy</span>
+                          <span style={{ fontSize:'10px', padding:'1px 8px', borderRadius:'10px', background: isDocker ? 'rgba(96,165,250,0.15)' : 'rgba(245,158,11,0.15)', border: `1px solid ${isDocker ? '#60a5fa30' : '#f59e0b30'}`, color: isDocker ? '#60a5fa' : '#fbbf24', fontWeight:700 }}>
+                            {evt.mode}
+                          </span>
+                          {i === 0 && <span style={{ fontSize:'10px', padding:'1px 8px', borderRadius:'10px', background:'rgba(52,211,153,0.15)', border:'1px solid rgba(52,211,153,0.3)', color:'#34d399', fontWeight:700, animation:'pulse 1.5s infinite' }}>NEW</span>}
+                        </div>
+                        <p style={{ fontSize:'11px', color:'#475569', lineHeight:1.6 }}>{evt.message}</p>
+                      </div>
+                      <div style={{ display:'flex', flexDirection:'column', gap:'2px', alignItems:'flex-end', flexShrink:0 }}>
+                        <span style={{ fontSize:'10px', color:'#1e293b', fontFamily:'monospace' }}>
+                          {new Date(evt.timestamp).toLocaleTimeString()}
+                        </span>
+                        <span style={{ fontSize:'11px', color:'#34d399', fontWeight:700 }}>
+                          ⚡ {evt.healDurationMs}ms
+                        </span>
+                        <span style={{ fontSize:'10px', color:'#475569' }}>
+                          {evt.replicaCount} replica{evt.replicaCount !== 1 ? 's' : ''}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
         *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+        @keyframes fadeIn { from{opacity:0;transform:translateY(-6px)} to{opacity:1;transform:translateY(0)} }
         ::-webkit-scrollbar { width:5px; height:5px; }
         ::-webkit-scrollbar-track { background:#060b14; }
         ::-webkit-scrollbar-thumb { background:#1e293b; border-radius:3px; }

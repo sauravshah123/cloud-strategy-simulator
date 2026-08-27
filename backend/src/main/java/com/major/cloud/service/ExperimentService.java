@@ -19,6 +19,7 @@ public class ExperimentService {
     private final MonitoringService monitoringService;
     private final DockerOrchestrationService dockerOrchestrationService;
     private final SelfHealingService selfHealingService;
+    private final AutoHealingEngine autoHealingEngine;
 
     /** Full experiment — returns timeline data per step for charting */
     public Map<String, Object> runExperimentDetailed(List<String> strategyNames, String dockerImage) {
@@ -33,9 +34,20 @@ public class ExperimentService {
 
         if (useDocker) {
             log.info("Starting Docker-based experiment with image: {}", dockerImage);
-            dockerOrchestrationService.pullImage(dockerImage);
+            boolean pulled = dockerOrchestrationService.pullImage(dockerImage);
+            if (!pulled) {
+                log.error("Aborting experiment — image '{}' could not be pulled.", dockerImage);
+                return Map.of(
+                    "error",   "IMAGE_PULL_FAILED",
+                    "message", "Docker image '" + dockerImage + "' could not be pulled. " +
+                               "Check image name, network access, and Docker daemon status."
+                );
+            }
             selfHealingService.clearEvents();
         }
+
+        // Arm the auto-healing engine for this experiment
+        autoHealingEngine.startExperiment(dockerImage);
 
         // Increase sample size to 30 for docker to allow time for containers to start/stop
         int samples = useDocker ? 30 : 10;
@@ -56,6 +68,8 @@ public class ExperimentService {
         List<Map<String, Object>> allResults = new ArrayList<>();
         Map<String, Object> bestResult = null;
         double bestLatency = Double.MAX_VALUE;
+        // Snapshot healing events per strategy before cleanupAll() wipes container state
+        Map<String, List<ScalingEvent>> healingSnapshot = new java.util.HashMap<>();
 
         try {
             for (String name : strategyNames) {
@@ -64,6 +78,11 @@ public class ExperimentService {
 
                 Map<String, Object> entry = simulateStrategyDetailed(strategy, wave, useDocker, dockerImage);
                 allResults.add(entry);
+
+                // Capture healing events now, while selfHealingService still has them
+                if (useDocker) {
+                    healingSnapshot.put(name, selfHealingService.getHealingEvents(name));
+                }
 
                 double lat = (double) entry.get("averageResponseTime");
                 if (lat < bestLatency) {
@@ -75,6 +94,7 @@ public class ExperimentService {
             if (useDocker) {
                 dockerOrchestrationService.cleanupAll();
             }
+            autoHealingEngine.stopExperiment();
         }
 
         allResults.sort(Comparator.comparingDouble(e -> (double) e.get("averageResponseTime")));

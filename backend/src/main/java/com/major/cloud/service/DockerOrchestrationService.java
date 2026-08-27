@@ -3,6 +3,7 @@ package com.major.cloud.service;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.RestartPolicy;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.core.DockerClientImpl;
 import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
@@ -54,24 +55,45 @@ public class DockerOrchestrationService {
         return dockerAvailable;
     }
 
-    public void pullImage(String image) {
-        if (!dockerAvailable) { log.warn("Docker not available, skipping pull: {}", image); return; }
+    /**
+     * Pulls the given image. Returns {@code true} on success, {@code false} on failure.
+     * Callers should abort the experiment if this returns false.
+     */
+    public boolean pullImage(String image) {
+        if (!dockerAvailable) {
+            log.warn("Docker not available, skipping pull: {}", image);
+            return false;
+        }
         try {
             log.info("Pulling image: {}", image);
             dockerClient.pullImageCmd(image).start().awaitCompletion();
             log.info("Image pulled: {}", image);
+            return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.error("Image pull interrupted for {}", image, e);
+            return false;
         } catch (Exception e) {
             log.error("Failed to pull image {}: {}", image, e.getMessage());
+            return false;
         }
     }
 
+    /**
+     * Starts a container for any image — short-lived images (alpine, busybox, etc.)
+     * are given a long-running sleep entrypoint so they stay alive for the duration
+     * of the experiment. A restart-on-failure policy ensures the container recovers
+     * after a chaos crash, enabling self-healing to kick in.
+     */
     public String startContainer(String strategyName, String image) {
         if (!dockerAvailable) return null;
+        String normImage = normaliseImage(image);
         try {
-            CreateContainerResponse container = dockerClient.createContainerCmd(image)
+            CreateContainerResponse container = dockerClient.createContainerCmd(normImage)
+                    // Keep any image alive for up to 1 h — works for busybox, alpine, nginx, redis, etc.
+                    .withEntrypoint("sh", "-c", "sleep 3600")
+                    // Restart up to 5 times on non-zero exit so chaos self-healing has something to observe
+                    .withRestartPolicy(RestartPolicy.onFailureRestart(5))
                     .withLabels(Map.of(
                         "cloud-strategy-simulator", "true",
                         "strategy", strategyName
@@ -80,12 +102,42 @@ public class DockerOrchestrationService {
             dockerClient.startContainerCmd(container.getId()).exec();
             activeContainers.computeIfAbsent(strategyName, k -> new ArrayList<>())
                             .add(container.getId());
-            log.info("Started container {} for strategy {}", container.getId().substring(0, 8), strategyName);
+            log.info("Started container {} ({}) for strategy {}", shortId(container.getId()), normImage, strategyName);
             return container.getId();
         } catch (Exception e) {
-            log.error("Failed to start container for strategy {}: {}", strategyName, e.getMessage());
-            return null;
+            // Fallback: try without the sleep entrypoint override for images that have their own daemon
+            log.warn("sleep-entrypoint failed for {} — retrying with default entrypoint: {}", normImage, e.getMessage());
+            try {
+                CreateContainerResponse container = dockerClient.createContainerCmd(normImage)
+                        .withRestartPolicy(RestartPolicy.onFailureRestart(5))
+                        .withLabels(Map.of(
+                            "cloud-strategy-simulator", "true",
+                            "strategy", strategyName
+                        ))
+                        .exec();
+                dockerClient.startContainerCmd(container.getId()).exec();
+                activeContainers.computeIfAbsent(strategyName, k -> new ArrayList<>())
+                                .add(container.getId());
+                log.info("Started container {} ({}) [default entrypoint] for strategy {}",
+                         shortId(container.getId()), normImage, strategyName);
+                return container.getId();
+            } catch (Exception ex) {
+                log.error("Failed to start container for strategy {} image {}: {}", strategyName, normImage, ex.getMessage());
+                return null;
+            }
         }
+    }
+
+    /**
+     * Appends {@code :latest} to bare image names that have no tag or digest.
+     * docker-java throws a parse error on bare names like {@code nginx} or {@code redis}.
+     */
+    private static String normaliseImage(String image) {
+        if (image == null || image.isBlank()) return image;
+        String trimmed = image.trim();
+        // Already has a tag (contains ':') or is a digest reference (contains '@')
+        if (trimmed.contains(":") || trimmed.contains("@")) return trimmed;
+        return trimmed + ":latest";
     }
 
     public void stopContainer(String strategyName) {
@@ -105,13 +157,21 @@ public class DockerOrchestrationService {
         }
     }
 
+    /**
+     * Returns a safe short ID (max 12 chars) without throwing if the ID is unexpectedly short.
+     */
+    private String shortId(String id) {
+        if (id == null) return "<null>";
+        return id.length() > 12 ? id.substring(0, 12) : id;
+    }
+
     private void forceStop(String containerId) {
         try {
             dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
             dockerClient.removeContainerCmd(containerId).withForce(true).exec();
-            log.info("Stopped container {}", containerId.substring(0, 8));
+            log.info("Stopped container {}", shortId(containerId));
         } catch (Exception e) {
-            log.error("Failed to stop container {}: {}", containerId.substring(0, 8), e.getMessage());
+            log.error("Failed to stop container {}: {}", shortId(containerId), e.getMessage());
         }
     }
 

@@ -22,11 +22,44 @@ public class ExperimentController {
 
     @PostMapping("/experiment")
     public ResponseEntity<Map<String, Object>> runExperiment(@RequestBody Map<String, Object> request) {
-        @SuppressWarnings("unchecked")
-        List<String> strategies = (List<String>) request.getOrDefault("strategies", List.of("CPU", "TREND", "LATENCY"));
+        // --- Input validation: produce a clear 400 instead of an opaque parse error ---
+        Object rawStrategies = request.get("strategies");
+        List<String> strategies;
+        if (rawStrategies == null) {
+            // Default when not provided
+            strategies = List.of("CPU", "TREND", "LATENCY");
+        } else if (rawStrategies instanceof List<?> rawList) {
+            try {
+                //noinspection unchecked
+                strategies = (List<String>) rawList;
+                if (strategies.isEmpty()) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                        "error",   "INVALID_REQUEST",
+                        "message", "'strategies' must be a non-empty array, e.g. [\"CPU\", \"TREND\", \"LATENCY\"]"
+                    ));
+                }
+            } catch (ClassCastException e) {
+                return ResponseEntity.badRequest().body(Map.of(
+                    "error",   "INVALID_REQUEST",
+                    "message", "Each element of 'strategies' must be a string."
+                ));
+            }
+        } else {
+            return ResponseEntity.badRequest().body(Map.of(
+                "error",   "INVALID_REQUEST",
+                "message", "'strategies' must be a JSON array of strings, e.g. [\"CPU\", \"TREND\", \"LATENCY\"]. " +
+                           "Make sure you send Content-Type: application/json."
+            ));
+        }
+
         String dockerImage = (String) request.get("dockerImage");
 
         Map<String, Object> response = experimentService.runExperimentDetailed(strategies, dockerImage);
+
+        // If the service itself signalled an error (e.g. image pull failure), return 400
+        if (response.containsKey("error")) {
+            return ResponseEntity.badRequest().body(response);
+        }
 
         // Save to history
         Map<String, Object> historyEntry = new LinkedHashMap<>(response);

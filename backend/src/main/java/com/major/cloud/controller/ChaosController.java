@@ -20,6 +20,12 @@ public class ChaosController {
 
     private final DockerOrchestrationService dockerOrchestrationService;
 
+    /** Safe short ID — avoids StringIndexOutOfBoundsException on unexpectedly short IDs. */
+    private static String shortId(String id, int max) {
+        if (id == null) return "<null>";
+        return id.length() > max ? id.substring(0, max) : id;
+    }
+
     @PostMapping("/crash")
     @Operation(summary = "Crash a container", description = "Forcefully stops one container for the given strategy to trigger self-healing")
     public ResponseEntity<Map<String, Object>> crashContainer(
@@ -44,13 +50,13 @@ public class ChaosController {
 
         String containerId = containers.get(0);
         try {
-            log.warn("💥 CHAOS: Manually crashing container {} for strategy {}", containerId.substring(0, 8), strategy);
+            log.warn("💥 CHAOS: Manually crashing container {} for strategy {}", shortId(containerId, 8), strategy);
             dockerOrchestrationService.stopSpecificContainer(strategy, containerId);
             return ResponseEntity.ok(Map.of(
                     "status",      "CRASHED",
-                    "containerId", containerId.substring(0, 12),
+                    "containerId", shortId(containerId, 12),
                     "strategy",    strategy,
-                    "message",     "Crashed container " + containerId.substring(0, 8) +
+                    "message",     "Crashed container " + shortId(containerId, 8) +
                                    ". Self-healer will detect this within 1-2 seconds and spin up a replacement."
             ));
         } catch (Exception e) {
