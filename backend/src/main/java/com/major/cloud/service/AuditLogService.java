@@ -107,11 +107,11 @@ public class AuditLogService {
             long c = log.stream().filter(e -> e.getAction() == t).count();
             if (c > 0) counts.put(t.name(), c);
         }
-        return Map.of(
-                "totalEntries",    (long) log.size(),
-                "actionBreakdown", counts,
-                "oldestEntry",     log.isEmpty() ? null : log.get(0).getTimestamp().toString(),
-                "newestEntry",     log.isEmpty() ? null : log.get(log.size()-1).getTimestamp().toString()
-        );
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("totalEntries",    (long) log.size());
+        stats.put("actionBreakdown", counts);
+        stats.put("oldestEntry",     log.isEmpty() ? "—" : log.get(0).getTimestamp().toString());
+        stats.put("newestEntry",     log.isEmpty() ? "—" : log.get(log.size()-1).getTimestamp().toString());
+        return stats;
     }
 }

@@ -153,9 +153,12 @@ public class AlertService {
         emitter.onCompletion(() -> subscribers.remove(emitter));
         emitter.onTimeout(()    -> subscribers.remove(emitter));
         emitter.onError(e       -> subscribers.remove(emitter));
-        // Send all unacked alerts on connect
+        // Send summary count on connect (avoid serializing LocalDateTime in raw Alert objects)
         try {
-            String json = mapper.writeValueAsString(getAlerts(false));
+            String json = mapper.writeValueAsString(Map.of(
+                "total",         firedAlerts.size(),
+                "unacknowledged", firedAlerts.stream().filter(a -> !a.isAcknowledged()).count()
+            ));
             emitter.send(SseEmitter.event().name("history").data(json));
         } catch (IOException ignored) {}
         return emitter;
@@ -165,12 +168,13 @@ public class AlertService {
         String json;
         try { json = mapper.writeValueAsString(Map.of(
                 "id",          alert.getId(),
-                "severity",    alert.getRule().severity(),
+                "severity",    alert.getRule().severity().name(),
                 "metric",      alert.getRule().metric(),
                 "threshold",   alert.getRule().threshold(),
                 "actualValue", alert.getActualValue(),
                 "message",     alert.getMessage(),
-                "timestamp",   alert.getTimestamp().toString()
+                "timestamp",   alert.getTimestamp().toString(),
+                "acknowledged",alert.isAcknowledged()
         )); } catch (Exception e) { return; }
 
         subscribers.removeIf(emitter -> {

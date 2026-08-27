@@ -88,9 +88,9 @@ public class HealingController {
         }
 
         if (!healingEngine.isActive()) {
-            return ResponseEntity.badRequest().body(Map.of(
+            return ResponseEntity.ok(Map.of(
                     "status",  "NOT_ARMED",
-                    "message", "Arm the healing engine first via POST /api/healing/arm"
+                    "message", "Arm the healing engine first via POST /api/healing/arm, then inject chaos."
             ));
         }
 

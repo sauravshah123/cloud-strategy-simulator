@@ -274,7 +274,10 @@ export default function App() {
         toast(a.message, a.severity);
       } catch {}
     });
-    es.addEventListener('history', e => { try { setAlerts(JSON.parse(e.data)); } catch {} });
+    es.addEventListener('history', () => {
+      // Refresh full alert list from REST on connect
+      fetch(`${API}/api/alerts`).then(r => r.ok ? r.json() : []).then(setAlerts).catch(() => {});
+    });
     es.onerror = () => { es.close(); setTimeout(connectAlertSSE, 5000); };
     alertRef.current = es;
   }, [toast]);

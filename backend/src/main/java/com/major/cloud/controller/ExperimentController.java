@@ -16,7 +16,6 @@ import java.util.*;
 public class ExperimentController {
 
     private final ExperimentService      experimentService;
-    private final MonitoringService      monitoringService;
     private final CostCalculationService costService;
     private final SlaTrackerService      slaTrackerService;
     private final AuditLogService        auditLogService;
@@ -88,18 +87,5 @@ public class ExperimentController {
         synchronized (history) {
             return ResponseEntity.ok(new ArrayList<>(history));
         }
-    }
-
-    @GetMapping("/metrics")
-    @Operation(summary = "Current server metrics snapshot")
-    public ResponseEntity<Map<String, Object>> getMetrics() {
-        double cpu = monitoringService.getRealCpuUsage();
-        double mem = monitoringService.getRealMemoryUsage();
-        return ResponseEntity.ok(Map.of(
-                "cpuUsage",    Math.round(cpu * 10.0) / 10.0,
-                "memoryUsage", Math.round(mem * 10.0) / 10.0,
-                "status",      cpu > 80 ? "HIGH" : cpu > 50 ? "MEDIUM" : "LOW",
-                "timestamp",   System.currentTimeMillis()
-        ));
     }
 }
