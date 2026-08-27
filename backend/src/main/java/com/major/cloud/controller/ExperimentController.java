@@ -1,5 +1,8 @@
 package com.major.cloud.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.major.cloud.model.entity.ExperimentRunEntity;
+import com.major.cloud.repository.ExperimentRunRepository;
 import com.major.cloud.service.*;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -8,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Instant;
 import java.util.*;
 
 @Slf4j
@@ -21,8 +25,11 @@ public class ExperimentController {
     private final CostCalculationService costService;
     private final SlaTrackerService      slaTrackerService;
     private final AuditLogService        auditLogService;
+    private final WebhookService         webhookService;
+    private final ExperimentRunRepository experimentRunRepository;
+    private final ObjectMapper           objectMapper = new ObjectMapper();
 
-    // In-memory experiment history (last 10 runs)
+    // In-memory experiment history (last 10 runs) — fast read for dashboard
     private final LinkedList<Map<String, Object>> history = new LinkedList<>();
 
     @PostMapping("/experiment")
@@ -95,7 +102,34 @@ public class ExperimentController {
                 history.addFirst(historyEntry);
             }
 
+            // ── Persist to DB ─────────────────────────────────────────
+            try {
+                ExperimentRunEntity run = new ExperimentRunEntity();
+                run.setRunAt(Instant.now());
+                run.setBestStrategy((String) response.get("bestStrategy"));
+                run.setPeakCpuUsage(toDouble(response.get("peakCpuUsage")));
+                run.setPeakMemUsage(toDouble(response.get("peakMemUsage")));
+                run.setAvgCpuUsage(toDouble(response.get("avgCpuUsage")));
+                run.setSampleCount(toInt(response.get("sampleCount")));
+                run.setDockerImage((String) response.get("dockerImage"));
+                run.setResultJson(objectMapper.writeValueAsString(historyEntry));
+                experimentRunRepository.save(run);
+            } catch (Exception dbEx) {
+                log.warn("Failed to persist experiment to DB (non-fatal): {}", dbEx.getMessage());
+            }
+
             log.info("Experiment complete — best={}", response.get("bestStrategy"));
+
+            // Fire webhook for experiment completion
+            try {
+                final Map<String, Object> summary = Map.of(
+                    "bestStrategy", String.valueOf(response.get("bestStrategy")),
+                    "peakCpuUsage", response.getOrDefault("peakCpuUsage", 0),
+                    "timestamp",    System.currentTimeMillis()
+                );
+                webhookService.fireExperiment(summary);
+            } catch (Exception ignored) {}
+
             return ResponseEntity.ok(response);
 
         } catch (Exception e) {
@@ -111,8 +145,37 @@ public class ExperimentController {
     @GetMapping("/history")
     @Operation(summary = "Experiment history (last 10 runs)")
     public ResponseEntity<List<Map<String, Object>>> getHistory() {
+        // Return in-memory cache if populated; fall back to DB
         synchronized (history) {
-            return ResponseEntity.ok(new ArrayList<>(history));
+            if (!history.isEmpty()) {
+                return ResponseEntity.ok(new ArrayList<>(history));
+            }
         }
+        // DB fallback — deserialize stored JSON
+        List<Map<String, Object>> dbHistory = experimentRunRepository
+                .findTop10ByOrderByRunAtDesc()
+                .stream()
+                .map(run -> {
+                    try {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> m = objectMapper.readValue(run.getResultJson(), Map.class);
+                        return m;
+                    } catch (Exception e) {
+                        return Map.of("id", run.getId(), "runAt", run.getRunAt().toEpochMilli(),
+                                "bestStrategy", String.valueOf(run.getBestStrategy()));
+                    }
+                })
+                .toList();
+        return ResponseEntity.ok(dbHistory);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    private static Double toDouble(Object v) {
+        if (v instanceof Number n) return n.doubleValue();
+        return null;
+    }
+    private static Integer toInt(Object v) {
+        if (v instanceof Number n) return n.intValue();
+        return null;
     }
 }

@@ -1,18 +1,24 @@
 package com.major.cloud.service;
 
+import com.major.cloud.model.entity.AuditLogEntry;
+import com.major.cloud.repository.AuditLogRepository;
 import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Immutable audit trail — every significant action is logged here.
- * Persisted in-memory (last 500 entries), exposed via REST.
+ * Immutable audit trail — every significant action is persisted to the database
+ * and also held in a small in-memory cache for the REST endpoint (no DB round-trip
+ * on every dashboard poll).
  */
 @Service
+@RequiredArgsConstructor
 public class AuditLogService {
 
     public enum ActionType {
@@ -21,97 +27,105 @@ public class AuditLogService {
         CONTAINER_CRASHED, CONTAINER_HEALED,
         ALERT_FIRED, ALERT_ACKNOWLEDGED,
         CONFIG_CHANGED, CHAOS_INJECTED,
-        LOAD_GENERATOR_STARTED, LOAD_GENERATOR_STOPPED
+        LOAD_GENERATOR_STARTED, LOAD_GENERATOR_STOPPED,
+        USER_ACTION, SYSTEM_EVENT
     }
 
+    /** Lightweight DTO returned to REST callers. */
     @Getter
-    public static class AuditEntry {
-        private final long          id;
-        private final ActionType    action;
-        private final String        actor;      // "SYSTEM" | "USER"
-        private final String        resource;   // e.g. strategy name, container ID
-        private final String        detail;
-        private final LocalDateTime timestamp;
-        private final String        severity;  // INFO | WARN | ERROR
+    public static class AuditEntryDto {
+        private final Long   id;
+        private final String actionType;
+        private final String actor;
+        private final String resource;
+        private final String detail;
+        private final String level;
+        private final String timestamp;
 
-        public AuditEntry(long id, ActionType action, String actor,
-                          String resource, String detail, String severity) {
-            this.id        = id;
-            this.action    = action;
-            this.actor     = actor;
-            this.resource  = resource;
-            this.detail    = detail;
-            this.timestamp = LocalDateTime.now();
-            this.severity  = severity;
+        public AuditEntryDto(AuditLogEntry e) {
+            this.id         = e.getId();
+            this.actionType = e.getActionType();
+            this.actor      = e.getActor();
+            this.resource   = e.getResource();
+            this.detail     = e.getDetail();
+            this.level      = e.getLevel();
+            this.timestamp  = e.getCreatedAt().toString();
         }
 
         public Map<String, Object> toMap() {
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("id",        id);
-            m.put("action",    action.name());
-            m.put("actor",     actor);
-            m.put("resource",  resource);
-            m.put("detail",    detail);
-            m.put("timestamp", timestamp.toString());
-            m.put("severity",  severity);
+            m.put("id",         id);
+            m.put("action",     actionType);
+            m.put("actor",      actor);
+            m.put("resource",   resource);
+            m.put("detail",     detail);
+            m.put("severity",   level);
+            m.put("timestamp",  timestamp);
             return m;
         }
     }
 
-    private static final int MAX_ENTRIES = 500;
-    private final List<AuditEntry>  log      = new CopyOnWriteArrayList<>();
-    private final AtomicLong        counter  = new AtomicLong(1);
+    private final AuditLogRepository repository;
 
     // ── Write ──────────────────────────────────────────────────────────────
 
-    public AuditEntry log(ActionType action, String actor, String resource,
-                          String detail, String severity) {
-        AuditEntry e = new AuditEntry(counter.getAndIncrement(), action, actor, resource, detail, severity);
-        log.add(e);
-        // Trim oldest entries
-        while (log.size() > MAX_ENTRIES) log.remove(0);
-        return e;
+    @Transactional
+    public AuditLogEntry log(ActionType action, String actor,
+                             String resource, String detail, String level) {
+        AuditLogEntry entry = new AuditLogEntry();
+        entry.setActionType(action.name());
+        entry.setActor(actor);
+        entry.setResource(resource);
+        entry.setDetail(detail);
+        entry.setLevel(level);
+        entry.setCreatedAt(Instant.now());
+        return repository.save(entry);
     }
 
-    public AuditEntry system(ActionType action, String resource, String detail) {
+    @Transactional
+    public AuditLogEntry system(ActionType action, String resource, String detail) {
         return log(action, "SYSTEM", resource, detail, "INFO");
     }
 
-    public AuditEntry user(ActionType action, String resource, String detail) {
+    @Transactional
+    public AuditLogEntry user(ActionType action, String resource, String detail) {
         return log(action, "USER", resource, detail, "INFO");
     }
 
-    public AuditEntry warn(ActionType action, String resource, String detail) {
+    @Transactional
+    public AuditLogEntry warn(ActionType action, String resource, String detail) {
         return log(action, "SYSTEM", resource, detail, "WARN");
     }
 
     // ── Read ───────────────────────────────────────────────────────────────
 
     public List<Map<String, Object>> getAll() {
-        List<AuditEntry> copy = new ArrayList<>(log);
-        Collections.reverse(copy);  // newest first
-        return copy.stream().map(AuditEntry::toMap).toList();
+        return repository.findAllByOrderByCreatedAtDesc(
+                PageRequest.of(0, 500, Sort.by(Sort.Direction.DESC, "createdAt")))
+                .stream()
+                .map(AuditEntryDto::new)
+                .map(AuditEntryDto::toMap)
+                .toList();
     }
 
     public List<Map<String, Object>> getByAction(String actionName) {
-        return log.stream()
-                .filter(e -> e.getAction().name().equalsIgnoreCase(actionName))
-                .sorted(Comparator.comparingLong(AuditEntry::getId).reversed())
-                .map(AuditEntry::toMap)
+        return repository.findByActionTypeOrderByCreatedAtDesc(actionName.toUpperCase())
+                .stream()
+                .map(AuditEntryDto::new)
+                .map(AuditEntryDto::toMap)
                 .toList();
     }
 
     public Map<String, Object> getStats() {
         Map<String, Long> counts = new LinkedHashMap<>();
         for (ActionType t : ActionType.values()) {
-            long c = log.stream().filter(e -> e.getAction() == t).count();
+            long c = repository.countByActionType(t.name());
             if (c > 0) counts.put(t.name(), c);
         }
+        long total = repository.count();
         Map<String, Object> stats = new LinkedHashMap<>();
-        stats.put("totalEntries",    (long) log.size());
+        stats.put("totalEntries",    total);
         stats.put("actionBreakdown", counts);
-        stats.put("oldestEntry",     log.isEmpty() ? "—" : log.get(0).getTimestamp().toString());
-        stats.put("newestEntry",     log.isEmpty() ? "—" : log.get(log.size()-1).getTimestamp().toString());
         return stats;
     }
 }

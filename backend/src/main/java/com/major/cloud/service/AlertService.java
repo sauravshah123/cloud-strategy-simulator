@@ -2,7 +2,9 @@ package com.major.cloud.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Getter;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -15,10 +17,18 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Real-time alert engine.
  * Evaluates incoming metrics against configurable rules.
  * Fires alerts via SSE to all connected subscribers.
+ * Delivers webhook notifications for CRITICAL/WARNING alerts.
  */
 @Slf4j
 @Service
 public class AlertService {
+
+    private WebhookService webhookService;
+
+    // Lazy injection to avoid circular dependency (WebhookService → AlertService → WebhookService)
+    public void setWebhookService(@Lazy WebhookService webhookService) {
+        this.webhookService = webhookService;
+    }
 
     public enum Severity { INFO, WARNING, CRITICAL }
 
@@ -143,6 +153,17 @@ public class AlertService {
         firedAlerts.add(alert);
         log.warn("🚨 ALERT [{}] {} — value={}", rule.severity(), alert.getMessage(), value);
         broadcast(alert);
+        // Deliver webhook notification for non-INFO alerts
+        if (webhookService != null && rule.severity() != Severity.INFO) {
+            webhookService.fireAlert(Map.of(
+                "id",        alert.getId(),
+                "severity",  rule.severity().name(),
+                "metric",    rule.metric(),
+                "threshold", rule.threshold(),
+                "actual",    alert.getActualValue(),
+                "message",   alert.getMessage()
+            ));
+        }
     }
 
     // ── SSE ───────────────────────────────────────────────────────────────────

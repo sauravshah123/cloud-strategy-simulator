@@ -1,0 +1,42 @@
+# kind cluster configuration for Cloud Strategy Simulator
+# Usage: kind create cluster --config=infra/kind-cluster.yaml --name=cloud-simulator
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: cloud-simulator
+nodes:
+  # Control plane
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8090
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
+
+  # Worker nodes
+  - role: worker
+    labels:
+      node-type: general
+  - role: worker
+    labels:
+      node-type: general
+
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5001"]
+          endpoint = ["http://kind-registry:5000"]
+
+networking:
+  # Disable default CNI so we can install Cilium
+  disableDefaultCNI: false
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"

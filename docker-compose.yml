@@ -1,0 +1,189 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────────────────
+#  Cloud Strategy Simulator — Full Local Dev Stack
+#
+#  Services:
+#    backend      Spring Boot API          :8080
+#    frontend     React (Vite dev server)  :3000
+#    postgres     PostgreSQL 15            :5432
+#    prometheus   Prometheus               :9090
+#    grafana      Grafana                  :3001
+#    loki         Loki log aggregator      :3100
+#    tempo        Tempo trace backend      :3200 / 4317
+#    otel         OpenTelemetry Collector  :4317 / 4318
+#
+#  Usage:
+#    docker-compose up -d
+#    docker-compose logs -f backend
+#    docker-compose down -v        # removes volumes
+# ─────────────────────────────────────────────────────────
+
+networks:
+  simulator-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  tempo-data:
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: simulator-postgres
+    restart: unless-stopped
+    networks: [simulator-net]
+    environment:
+      POSTGRES_DB:       cloudscale
+      POSTGRES_USER:     cloudscale
+      POSTGRES_PASSWORD: cloudscale_secret
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudscale"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Spring Boot Backend ───────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: simulator-backend
+    restart: unless-stopped
+    networks: [simulator-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE:              prod
+      SPRING_DATASOURCE_URL:               jdbc:postgresql://postgres:5432/cloudscale
+      SPRING_DATASOURCE_USERNAME:          cloudscale
+      SPRING_DATASOURCE_PASSWORD:          cloudscale_secret
+      SPRING_JPA_HIBERNATE_DDL_AUTO:       update
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,prometheus,metrics
+      OTEL_EXPORTER_OTLP_ENDPOINT:         http://otel:4318
+      OTEL_SERVICE_NAME:                   cloud-strategy-simulator
+      OTEL_LOGS_EXPORTER:                  otlp
+      OTEL_METRICS_EXPORTER:               otlp
+      OTEL_TRACES_EXPORTER:                otlp
+      JWT_SECRET:                          ${JWT_SECRET:-change-me-in-production-32chars}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── React Frontend (dev mode) ─────────────────────────
+  frontend:
+    image: node:20-alpine
+    container_name: simulator-frontend
+    restart: unless-stopped
+    networks: [simulator-net]
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      VITE_API_URL: localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  # ── OpenTelemetry Collector ───────────────────────────
+  otel:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: simulator-otel
+    restart: unless-stopped
+    networks: [simulator-net]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    command: ["--config=/etc/otel/config.yaml"]
+    ports:
+      - "4317:4317"   # gRPC OTLP
+      - "4318:4318"   # HTTP OTLP
+      - "8888:8888"   # Collector metrics
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
+  # ── Prometheus ────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: simulator-prometheus
+    restart: unless-stopped
+    networks: [simulator-net]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+
+  # ── Loki ─────────────────────────────────────────────
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: simulator-loki
+    restart: unless-stopped
+    networks: [simulator-net]
+    volumes:
+      - ./observability/loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/config.yaml
+    ports:
+      - "3100:3100"
+
+  # ── Tempo ─────────────────────────────────────────────
+  tempo:
+    image: grafana/tempo:2.3.1
+    container_name: simulator-tempo
+    restart: unless-stopped
+    networks: [simulator-net]
+    volumes:
+      - ./observability/tempo-config.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/tmp/tempo
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    ports:
+      - "3200:3200"   # Tempo query frontend
+      - "4317"        # (internal) gRPC OTLP from collector
+
+  # ── Grafana ───────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: simulator-grafana
+    restart: unless-stopped
+    networks: [simulator-net]
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    environment:
+      GF_SECURITY_ADMIN_USER:     admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP:     "false"
+      GF_SERVER_HTTP_PORT:        "3001"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3001"

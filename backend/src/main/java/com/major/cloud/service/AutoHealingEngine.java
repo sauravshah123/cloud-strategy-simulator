@@ -2,6 +2,8 @@ package com.major.cloud.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.major.cloud.model.HealingEvent;
+import com.major.cloud.model.entity.HealingEventEntity;
+import com.major.cloud.repository.HealingEventRepository;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +36,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class AutoHealingEngine {
 
     private final DockerOrchestrationService docker;
+    private final WebhookService             webhookService;
+    private final HealingEventRepository     healingEventRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // ── State ─────────────────────────────────────────────────────────────────
@@ -228,6 +232,35 @@ public class AutoHealingEngine {
         log.info("🔧 HEALED: {} [{}] → {} ({}ms)", evt.getCrashedContainerId(),
                 evt.getStrategy(), evt.getReplacementContainerId(), evt.getHealDurationMs());
         broadcast(evt);
+
+        // Persist to database
+        try {
+            HealingEventEntity entity = new HealingEventEntity();
+            entity.setStrategy(evt.getStrategy());
+            entity.setCrashedContainerId(evt.getCrashedContainerId());
+            entity.setReplacementContainerId(evt.getReplacementContainerId());
+            entity.setReplicaCount(evt.getReplicaCount());
+            entity.setMode(evt.getMode());
+            entity.setMessage(evt.getMessage());
+            entity.setOccurredAt(java.time.Instant.now());
+            entity.setHealDurationMs(evt.getHealDurationMs());
+            healingEventRepository.save(entity);
+        } catch (Exception dbEx) {
+            log.warn("Failed to persist healing event to DB: {}", dbEx.getMessage());
+        }
+
+        // Fire webhook notification (non-blocking, fire-and-forget)
+        try {
+            webhookService.fireHealing(java.util.Map.of(
+                "strategy",    evt.getStrategy(),
+                "mode",        evt.getMode(),
+                "crashed",     evt.getCrashedContainerId(),
+                "replacement", evt.getReplacementContainerId() != null ? evt.getReplacementContainerId() : "",
+                "replicas",    evt.getReplicaCount(),
+                "healMs",      evt.getHealDurationMs(),
+                "message",     evt.getMessage()
+            ));
+        } catch (Exception ignored) {}
     }
 
     private void broadcast(HealingEvent evt) {
