@@ -18,9 +18,28 @@ const SEVERITY_COLORS = {
   INFO:     { bg:'rgba(59,130,246,0.1)', border:'rgba(59,130,246,0.3)',  text:'#93c5fd' },
 };
 
-const fmt = v => typeof v === 'number' ? (Math.round(v * 10) / 10) : (v ?? '—');
+const fmt    = v => typeof v === 'number' ? (Math.round(v * 10) / 10) : (v ?? '—');
 const fmtUsd = v => `$${(v ?? 0).toFixed(4)}`;
 const fmtPct = v => `${fmt(v)}%`;
+
+// SLA grade → colour (was missing, caused crash on Results page)
+const SLA_GRADE_COLOR = grade => ({
+  AAA:'#34d399', AA:'#10b981', A:'#6ee7b7',
+  B:'#fbbf24', C:'#f87171'
+})[grade] || '#94a3b8';
+
+// Safe timestamp formatter — handles both string ISO and Java LocalDateTime arrays
+const fmtTs = ts => {
+  if (!ts) return '—';
+  try {
+    if (Array.isArray(ts)) {
+      // Java LocalDateTime serialized as [year,month,day,hour,min,sec,nano]
+      const [y,mo,d,h,mi,s] = ts;
+      return `${String(h).padStart(2,'0')}:${String(mi).padStart(2,'0')}:${String(s||0).padStart(2,'0')}`;
+    }
+    return new Date(ts).toLocaleTimeString();
+  } catch { return String(ts); }
+};
 
 // ── Tiny SVG line chart ──────────────────────────────────
 function Spark({ data, color, height = 48 }) {
@@ -769,7 +788,7 @@ export default function App() {
                             const m=STRAT[ev.strategyName]||STRAT.CPU, up=ev.newReplicas>ev.oldReplicas;
                             return (
                               <tr key={i} style={{ borderBottom:'1px solid #080d1a' }}>
-                                <td style={{ padding:'9px 12px', color:'#334155', fontFamily:'monospace' }}>{new Date(ev.timestamp).toLocaleTimeString()}</td>
+                                <td style={{ padding:'9px 12px', color:'#334155', fontFamily:'monospace' }}>{fmtTs(ev.timestamp)}</td>
                                 <td style={{ padding:'9px 12px' }}><span style={{ padding:'2px 9px', borderRadius:'20px', fontSize:'10px', fontWeight:700, background:`${m.color}12`, color:m.light, border:`1px solid ${m.color}25` }}>{ev.strategyName}</span></td>
                                 <td style={{ padding:'9px 12px', fontFamily:'monospace', color: up?'#34d399':'#f87171', fontWeight:700 }}>{ev.oldReplicas}→{ev.newReplicas} {up?'▲':'▼'}</td>
                                 <td style={{ padding:'9px 12px', color:'#475569' }}>{ev.reason}</td>
