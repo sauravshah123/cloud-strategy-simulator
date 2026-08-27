@@ -4,15 +4,17 @@ import com.major.cloud.service.*;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
 
+@Slf4j
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
-@Tag(name = "Experiments", description = "Run scaling strategy experiments against live system metrics")
+@Tag(name = "Experiments", description = "Run scaling strategy experiments")
 public class ExperimentController {
 
     private final ExperimentService      experimentService;
@@ -24,61 +26,86 @@ public class ExperimentController {
     private final LinkedList<Map<String, Object>> history = new LinkedList<>();
 
     @PostMapping("/experiment")
-    @Operation(summary = "Run a scaling experiment",
-               description = "Samples 10 seconds of real OS metrics and simulates all 3 strategies. " +
-                             "Pass dockerImage to run real Docker containers.")
-    public ResponseEntity<Map<String, Object>> runExperiment(@RequestBody Map<String, Object> request) {
-        @SuppressWarnings("unchecked")
-        List<String> strategies = (List<String>) request.getOrDefault("strategies",
-                                  List.of("CPU", "TREND", "LATENCY"));
-        String dockerImage = (String) request.get("dockerImage");
+    @Operation(summary = "Run a scaling experiment")
+    public ResponseEntity<Map<String, Object>> runExperiment(
+            @RequestBody(required = false) Map<String, Object> request) {
+        try {
+            // ── Parse request (robust defaults) ──────────────────────
+            if (request == null) request = new LinkedHashMap<>();
 
-        auditLogService.user(AuditLogService.ActionType.EXPERIMENT_STARTED,
-                "EXPERIMENT", "Strategies: " + strategies + ", image: " + dockerImage);
+            @SuppressWarnings("unchecked")
+            List<String> strategies = (List<String>) request.getOrDefault(
+                    "strategies", List.of("CPU", "TREND", "LATENCY"));
+            String dockerImage = (String) request.get("dockerImage");
 
-        Map<String, Object> response = experimentService.runExperimentDetailed(strategies, dockerImage);
+            log.info("Starting experiment — strategies={}, docker={}", strategies, dockerImage);
 
-        // ── Enrich with cost analysis ─────────────────────────────────
-        int durationSecs = dockerImage != null ? 30 : 10;
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> stratResults = (List<Map<String, Object>>) response.get("strategies");
-        if (stratResults != null) {
-            List<Map<String, Object>> costs = costService.compareStrategyCosts(stratResults, durationSecs);
-            response.put("costAnalysis", costs);
+            auditLogService.user(AuditLogService.ActionType.EXPERIMENT_STARTED,
+                    "EXPERIMENT", "strategies=" + strategies + " image=" + dockerImage);
 
-            // Best strategy cost projection
-            costs.stream().findFirst().ifPresent(best -> {
-                double bestCph = (double) best.get("costPerHourUsd");
-                response.put("costProjection", costService.monthlyProjection(bestCph));
-                response.put("bestStrategyCostPerHour", bestCph);
-            });
-        }
+            // ── Core simulation ───────────────────────────────────────
+            Map<String, Object> response = experimentService.runExperimentDetailed(strategies, dockerImage);
 
-        // ── Record SLA ticks for each strategy ───────────────────────
-        if (stratResults != null) {
-            for (Map<String, Object> s : stratResults) {
-                String name = (String) s.get("strategy");
+            // runExperimentDetailed returns Map.of() on image-pull failure → immutable
+            // We always want a mutable response to enrich with cost/SLA data
+            response = new LinkedHashMap<>(response);
+
+            // ── Cost analysis ─────────────────────────────────────────
+            try {
                 @SuppressWarnings("unchecked")
-                List<Integer> timeline = (List<Integer>) s.getOrDefault("replicaTimeline", List.of(2));
-                for (int replicas : timeline) {
-                    slaTrackerService.recordTick(name, replicas);
+                List<Map<String, Object>> stratResults =
+                        (List<Map<String, Object>>) response.get("strategies");
+
+                if (stratResults != null && !stratResults.isEmpty()) {
+                    int durationSecs = dockerImage != null && !dockerImage.isBlank() ? 30 : 10;
+                    List<Map<String, Object>> costs =
+                            costService.compareStrategyCosts(stratResults, durationSecs);
+                    response.put("costAnalysis", costs);
+
+                    if (!costs.isEmpty()) {
+                        double bestCph = (double) costs.get(0).get("costPerHourUsd");
+                        response.put("costProjection", costService.monthlyProjection(bestCph));
+                        response.put("bestStrategyCostPerHour", bestCph);
+                    }
+
+                    // ── SLA ticks ─────────────────────────────────────
+                    for (Map<String, Object> s : stratResults) {
+                        String name = (String) s.get("strategy");
+                        @SuppressWarnings("unchecked")
+                        List<Integer> timeline =
+                                (List<Integer>) s.getOrDefault("replicaTimeline", List.of(2));
+                        for (int replicas : timeline) slaTrackerService.recordTick(name, replicas);
+                    }
+                    response.put("slaSnapshot", slaTrackerService.getAllSummaries());
                 }
+            } catch (Exception costEx) {
+                log.warn("Cost/SLA enrichment failed (non-fatal): {}", costEx.getMessage());
+                // Don't fail the whole request — just omit cost data
             }
-            response.put("slaSnapshot", slaTrackerService.getAllSummaries());
-        }
 
-        auditLogService.system(AuditLogService.ActionType.EXPERIMENT_COMPLETED,
-                "EXPERIMENT", "Best: " + response.get("bestStrategy") +
-                ", CPU peak: " + response.get("peakCpuUsage") + "%");
+            auditLogService.system(AuditLogService.ActionType.EXPERIMENT_COMPLETED,
+                    "EXPERIMENT", "best=" + response.get("bestStrategy")
+                    + " cpu=" + response.get("peakCpuUsage") + "%");
 
-        // ── Save to history ───────────────────────────────────────────
-        Map<String, Object> historyEntry = new LinkedHashMap<>(response);
-        historyEntry.put("runAt", System.currentTimeMillis());
-        synchronized (history) {
-            if (history.size() >= 10) history.removeLast();
-            history.addFirst(historyEntry);
+            // ── History ───────────────────────────────────────────────
+            Map<String, Object> historyEntry = new LinkedHashMap<>(response);
+            historyEntry.put("runAt", System.currentTimeMillis());
+            synchronized (history) {
+                if (history.size() >= 10) history.removeLast();
+                history.addFirst(historyEntry);
+            }
+
+            log.info("Experiment complete — best={}", response.get("bestStrategy"));
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            log.error("Experiment failed: {}", e.getMessage(), e);
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("status",  "ERROR");
+            err.put("message", e.getMessage());
+            err.put("error",   e.getClass().getSimpleName());
+            return ResponseEntity.internalServerError().body(err);
         }
-        return ResponseEntity.ok(response);
     }
 
     @GetMapping("/history")

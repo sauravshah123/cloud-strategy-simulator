@@ -332,16 +332,30 @@ export default function App() {
         body: JSON.stringify(payload),
       });
       clearInterval(progRef.current); setProg(100);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
+
+      // Always parse body — even error responses contain JSON detail
+      let data;
+      try { data = await r.json(); } catch { data = null; }
+
+      if (!r.ok) {
+        // Extract the most descriptive error message available
+        const serverMsg = data?.message || data?.error || `Server responded with ${r.status}`;
+        throw new Error(serverMsg);
+      }
+
+      // If backend returned an error key in the body (e.g. IMAGE_PULL_FAILED)
+      if (data?.error && !data?.strategies) {
+        throw new Error(data.message || data.error);
+      }
+
       setResult(data);
       setPage('results');
       toast(`✅ Experiment done! Winner: ${data.bestStrategy}`, 'INFO');
     } catch (e) {
       clearInterval(progRef.current);
-      const msg = e.message.includes('fetch')
+      const msg = (e.message || '').includes('fetch')
         ? 'Cannot reach backend. Wait 30-60s for server to wake up (Render free tier).'
-        : e.message;
+        : e.message || 'Experiment failed';
       setError(msg);
       toast(msg, 'CRITICAL');
     } finally {
