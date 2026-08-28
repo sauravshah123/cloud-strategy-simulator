@@ -288,6 +288,203 @@ function Empty({ emoji, title, sub, action, onClick }) {
   );
 }
 
+// ── Animated Counter ──────────────────────────────────────────────────────────
+function AnimatedCounter({ target, duration=1200, prefix='', suffix='' }) {
+  const [val, setVal] = useState(0);
+  const startRef = useRef(null);
+  useEffect(() => {
+    const t = typeof target === 'number' ? target : parseFloat(target) || 0;
+    const start = performance.now();
+    const tick = now => {
+      const elapsed = now - start;
+      const pct = Math.min(1, elapsed / duration);
+      const ease = 1 - Math.pow(1 - pct, 3);
+      setVal(Math.round(ease * t * 10) / 10);
+      if (pct < 1) startRef.current = requestAnimationFrame(tick);
+    };
+    startRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(startRef.current);
+  }, [target, duration]);
+  return <>{prefix}{val}{suffix}</>;
+}
+
+// ── Skeleton loader ───────────────────────────────────────────────────────────
+function Skeleton({ width='100%', height=18, radius=6, style={} }) {
+  return (
+    <div style={{ width, height, borderRadius:radius, background:'linear-gradient(90deg,#0f172a 25%,#1e293b 50%,#0f172a 75%)',
+      backgroundSize:'200% 100%', animation:'shimmer 1.5s infinite', ...style }}/>
+  );
+}
+
+// ── Confetti burst ────────────────────────────────────────────────────────────
+function Confetti({ active }) {
+  const [particles, setParticles] = useState([]);
+  useEffect(() => {
+    if (!active) return;
+    const cols = ['#3b82f6','#10b981','#a855f7','#f59e0b','#ef4444','#06b6d4','#ec4899'];
+    setParticles(Array.from({length:80}, (_,i) => ({
+      id:i, x:Math.random()*100, delay:Math.random()*0.6,
+      col:cols[Math.floor(Math.random()*cols.length)],
+      size:Math.random()*8+4, rot:Math.random()*360,
+      vx:(Math.random()-0.5)*8, vy:Math.random()*-12-4,
+    })));
+    const t = setTimeout(() => setParticles([]), 3500);
+    return () => clearTimeout(t);
+  }, [active]);
+  if (!particles.length) return null;
+  return (
+    <div style={{ position:'fixed', inset:0, pointerEvents:'none', zIndex:99999, overflow:'hidden' }}>
+      {particles.map(p => (
+        <div key={p.id} style={{
+          position:'absolute', left:`${p.x}%`, top:'-20px',
+          width:p.size, height:p.size, background:p.col, borderRadius:'2px',
+          animation:`confettiFall 3s ${p.delay}s ease-in forwards`,
+          transform:`rotate(${p.rot}deg)`,
+        }}/>
+      ))}
+    </div>
+  );
+}
+
+// ── Hero / Welcome Screen ─────────────────────────────────────────────────────
+function HeroScreen({ onStart, onSkip }) {
+  const [step, setStep] = useState(0);
+  useEffect(() => {
+    const t = setTimeout(() => setStep(1), 200);
+    return () => clearTimeout(t);
+  }, []);
+  const stats = [
+    { icon:'🖥', label:'Strategies Compared', val:3 },
+    { icon:'💰', label:'Cost Reduction', val:40, suffix:'%' },
+    { icon:'⚡', label:'Latency Improvement', val:60, suffix:'%' },
+    { icon:'📊', label:'Live Metrics/s', val:1 },
+  ];
+  return (
+    <div style={{ position:'fixed', inset:0, zIndex:1000, background:'#060b14',
+      display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
+      padding:'24px', overflow:'hidden' }}>
+      {/* Background glows */}
+      <div style={{ position:'absolute', top:'-20%', left:'-10%', width:'60vw', height:'60vw',
+        background:'radial-gradient(circle,rgba(59,130,246,0.12),transparent 65%)', pointerEvents:'none' }}/>
+      <div style={{ position:'absolute', bottom:'-20%', right:'-10%', width:'60vw', height:'60vw',
+        background:'radial-gradient(circle,rgba(168,85,247,0.10),transparent 65%)', pointerEvents:'none' }}/>
+      {/* Grid lines */}
+      <div style={{ position:'absolute', inset:0, backgroundImage:'linear-gradient(rgba(59,130,246,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.04) 1px,transparent 1px)',
+        backgroundSize:'60px 60px', pointerEvents:'none' }}/>
+
+      <div style={{ position:'relative', maxWidth:'700px', width:'100%', textAlign:'center',
+        opacity:step?1:0, transform:step?'translateY(0)':'translateY(30px)', transition:'all 0.8s ease' }}>
+
+        {/* Badge */}
+        <div style={{ display:'inline-flex', alignItems:'center', gap:'8px', padding:'6px 16px',
+          background:'rgba(59,130,246,0.1)', border:'1px solid rgba(59,130,246,0.3)',
+          borderRadius:'99px', marginBottom:'28px' }}>
+          <span style={{ width:'7px', height:'7px', borderRadius:'50%', background:'#34d399',
+            boxShadow:'0 0 10px #34d399', animation:'pulse 2s infinite', display:'inline-block' }}/>
+          <span style={{ fontSize:'12px', fontWeight:700, color:'#60a5fa', letterSpacing:'0.06em' }}>
+            CLOUD-AGNOSTIC AUTO-SCALING PLATFORM
+          </span>
+        </div>
+
+        {/* Headline */}
+        <h1 style={{ fontSize:'clamp(2rem,5vw,3.8rem)', fontWeight:900, lineHeight:1.1,
+          marginBottom:'20px', letterSpacing:'-2px' }}>
+          <span style={{ background:'linear-gradient(135deg,#e2e8f0,#94a3b8)', WebkitBackgroundClip:'text', WebkitTextFillColor:'transparent' }}>
+            Find the Best{' '}
+          </span>
+          <span style={{ background:'linear-gradient(135deg,#3b82f6,#a855f7)', WebkitBackgroundClip:'text', WebkitTextFillColor:'transparent' }}>
+            Scaling Strategy
+          </span>
+          <br/>
+          <span style={{ background:'linear-gradient(135deg,#e2e8f0,#94a3b8)', WebkitBackgroundClip:'text', WebkitTextFillColor:'transparent' }}>
+            for Your Cloud
+          </span>
+        </h1>
+
+        <p style={{ fontSize:'16px', color:'#475569', maxWidth:'520px', margin:'0 auto 36px', lineHeight:1.8 }}>
+          Run experiments on <strong style={{color:'#60a5fa'}}>CPU</strong>, <strong style={{color:'#10b981'}}>Trend</strong>, and <strong style={{color:'#a855f7'}}>Latency</strong> strategies simultaneously.
+          Compare costs, SLA uptime, and response times — all in under 10 seconds.
+        </p>
+
+        {/* Stats row */}
+        <div style={{ display:'flex', justifyContent:'center', gap:'28px', flexWrap:'wrap', marginBottom:'44px' }}>
+          {stats.map((s,i) => (
+            <div key={i} style={{ textAlign:'center' }}>
+              <div style={{ fontSize:'26px', fontWeight:900, color:'#e2e8f0', lineHeight:1 }}>
+                {step && <AnimatedCounter target={s.val} duration={1000+i*200} suffix={s.suffix||''}/>}
+              </div>
+              <div style={{ fontSize:'11px', color:'#334155', marginTop:'4px', letterSpacing:'0.04em' }}>{s.icon} {s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* CTAs */}
+        <div style={{ display:'flex', gap:'12px', justifyContent:'center', flexWrap:'wrap' }}>
+          <button onClick={onStart}
+            style={{ padding:'15px 40px', fontWeight:800, fontSize:'16px', color:'#fff',
+              background:'linear-gradient(135deg,#3b82f6,#6366f1)', border:'none', borderRadius:'14px',
+              cursor:'pointer', boxShadow:'0 0 40px rgba(99,102,241,0.5)', transition:'all 0.25s',
+              letterSpacing:'0.02em' }}
+            onMouseEnter={e=>{e.currentTarget.style.transform='translateY(-2px) scale(1.03)';e.currentTarget.style.boxShadow='0 0 60px rgba(99,102,241,0.7)';}}
+            onMouseLeave={e=>{e.currentTarget.style.transform='translateY(0) scale(1)';e.currentTarget.style.boxShadow='0 0 40px rgba(99,102,241,0.5)';}}>
+            🚀 Start Demo Experiment
+          </button>
+          <button onClick={onSkip}
+            style={{ padding:'15px 32px', fontWeight:600, fontSize:'15px', color:'#475569',
+              background:'transparent', border:'1px solid #1e293b', borderRadius:'14px',
+              cursor:'pointer', transition:'all 0.2s' }}
+            onMouseEnter={e=>{e.currentTarget.style.borderColor='#334155';e.currentTarget.style.color='#94a3b8';}}
+            onMouseLeave={e=>{e.currentTarget.style.borderColor='#1e293b';e.currentTarget.style.color='#475569';}}>
+            Skip → Dashboard
+          </button>
+        </div>
+
+        {/* Feature pills */}
+        <div style={{ display:'flex', gap:'8px', justifyContent:'center', flexWrap:'wrap', marginTop:'36px' }}>
+          {['Real CPU metrics','AWS cost analysis','SLA tracking','Auto-healing','Live SSE stream','Docker support'].map(f=>(
+            <span key={f} style={{ fontSize:'11px', padding:'4px 12px', borderRadius:'99px',
+              background:'rgba(255,255,255,0.03)', border:'1px solid #0f172a', color:'#334155' }}>{f}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Quick Start card ──────────────────────────────────────────────────────────
+function QuickStart({ onRun }) {
+  return (
+    <Card style={{ border:'1px solid rgba(99,102,241,0.25)', background:'rgba(99,102,241,0.04)' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'16px' }}>
+        <div style={{ width:'42px', height:'42px', borderRadius:'12px', background:'rgba(99,102,241,0.15)',
+          display:'flex', alignItems:'center', justifyContent:'center', fontSize:'22px',
+          boxShadow:'0 0 16px rgba(99,102,241,0.3)' }}>🚀</div>
+        <div>
+          <div style={{ fontWeight:800, color:'#e2e8f0', fontSize:'15px' }}>Quick Start</div>
+          <div style={{ fontSize:'12px', color:'#475569' }}>Run your first experiment in 10 seconds</div>
+        </div>
+      </div>
+      <div style={{ display:'flex', gap:'10px', marginBottom:'20px' }}>
+        {[['1','Click Run Experiment','🧪'],['2','Wait 10 seconds','⏱'],['3','See winner + costs','🏆']].map(([n,t,ic])=>(
+          <div key={n} style={{ flex:1, textAlign:'center', padding:'12px 8px', background:'rgba(8,13,26,0.6)',
+            borderRadius:'10px', border:'1px solid #0f172a' }}>
+            <div style={{ fontSize:'20px', marginBottom:'6px' }}>{ic}</div>
+            <div style={{ fontSize:'11px', color:'#475569', lineHeight:1.5 }}><strong style={{color:'#60a5fa'}}>Step {n}</strong><br/>{t}</div>
+          </div>
+        ))}
+      </div>
+      <button onClick={onRun} style={{ width:'100%', padding:'13px', fontWeight:800, fontSize:'14px',
+        color:'#fff', background:'linear-gradient(135deg,#3b82f6,#6366f1)', border:'none',
+        borderRadius:'11px', cursor:'pointer', boxShadow:'0 6px 20px rgba(99,102,241,0.4)',
+        transition:'all 0.2s' }}
+        onMouseEnter={e=>{e.currentTarget.style.transform='translateY(-1px)';}}
+        onMouseLeave={e=>{e.currentTarget.style.transform='translateY(0)';}}>
+        ▶ Run Demo Experiment Now
+      </button>
+    </Card>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PAGES CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,6 +516,22 @@ export default function App() {
   const [history,    setHistory] = useState([]);
   const [error,      setError]   = useState(null);
   const [dockerImg,  setDocker]  = useState('');
+  const [showHero,   setHero]    = useState(() => !localStorage.getItem('css_seen'));
+  const [confetti,   setConfetti]= useState(false);
+
+  const runRef = useRef(null);
+
+  const handleHeroStart = useCallback(() => {
+    localStorage.setItem('css_seen','1');
+    setHero(false);
+    setPage('experiment');
+    setTimeout(() => runRef.current?.(), 600);
+  }, []);
+
+  const handleHeroSkip = useCallback(() => {
+    localStorage.setItem('css_seen','1');
+    setHero(false);
+  }, []);
   const [healEvents, setHealEvt] = useState([]);
   const [healStatus, setHealSt]  = useState(null);
   const [alerts,     setAlerts]  = useState([]);
@@ -463,6 +676,7 @@ export default function App() {
       setPage('results');
       toast(`✅ Experiment complete! Winner: ${data.bestStrategy} (${data.dockerMode||'SIMULATION'})`,'INFO');
       if (data.dockerNote) toast(`ℹ️ ${data.dockerNote}`,'INFO');
+      setConfetti(true); setTimeout(()=>setConfetti(false), 100);
     } catch(e) {
       clearInterval(progRef.current);
       const msg = (e.message||'').includes('fetch')
@@ -471,6 +685,7 @@ export default function App() {
       setError(msg); toast(msg,'CRITICAL');
     } finally { setLoad(false); setProg(0); }
   };
+  runRef.current = run; // keep ref fresh for hero screen
 
   // ── Load gen toggle ────────────────────────────────────────────────────────
   const toggleLoad = async () => {
@@ -585,8 +800,13 @@ export default function App() {
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+        @keyframes confettiFall{0%{transform:translateY(-20px) rotate(0deg);opacity:1}100%{transform:translateY(110vh) rotate(720deg);opacity:0}}
         @media print{aside,header,.no-print{display:none!important}main{padding:0!important}.card-print{break-inside:avoid}}
       `}</style>
+
+      {showHero && <HeroScreen onStart={handleHeroStart} onSkip={handleHeroSkip}/>}
+      <Confetti active={confetti}/>
 
       <div style={{ display:'flex', minHeight:'100vh', background:'#060b14', color:'#e2e8f0', fontFamily:"'Inter',-apple-system,sans-serif" }}>
         {/* Glow blobs */}
@@ -626,6 +846,11 @@ export default function App() {
             <h1 style={{ fontSize:'14px', fontWeight:700, color:'#94a3b8', flex:1, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
               {PAGES.find(p=>p.id===page)?.icon} {PAGES.find(p=>p.id===page)?.label}
             </h1>
+            {IS_RENDER && (
+              <span style={{ fontSize:'10px', fontWeight:800, padding:'3px 10px', borderRadius:'99px',
+                background:'rgba(99,102,241,0.15)', color:'#a5b4fc',
+                border:'1px solid rgba(99,102,241,0.3)', letterSpacing:'0.06em', flexShrink:0 }}>LIVE DEMO</span>
+            )}
             <div style={{ display:'flex', gap:'8px', alignItems:'center', flexShrink:0 }}>
               {snap && <span style={{ fontSize:'11px', color:'#334155', fontFamily:'monospace', whiteSpace:'nowrap' }}>CPU {fmt(snap.cpuUsage)}% | MEM {fmt(snap.memoryUsage)}%</span>}
               <button onClick={toggleLoad} style={{ padding:'5px 12px', fontWeight:700, fontSize:'11px',
@@ -668,6 +893,10 @@ export default function App() {
                   <KPI icon="🚨" label="Active Alerts"value={alertCount}                  color="#f87171" sub="unacknowledged"/>
                   <KPI icon="📡" label="Stream"       value={connected?'LIVE':'OFF'}      color={connected?'#34d399':'#ef4444'}/>
                 </div>
+
+                {history.length === 0 && !loading && (
+                  <QuickStart onRun={() => { setPage('experiment'); setTimeout(run, 300); }}/>
+                )}
 
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(340px,1fr))', gap:'14px' }}>
                   <Card>
