@@ -4,6 +4,9 @@ const API = import.meta.env.VITE_API_URL
   ? `https://${import.meta.env.VITE_API_URL}`
   : 'http://localhost:8080';
 
+// True when running on Render (Docker daemon not available there)
+const IS_RENDER = !!import.meta.env.VITE_API_URL;
+
 const MAX_LIVE = 60;
 
 const STRAT = {
@@ -458,7 +461,8 @@ export default function App() {
       if (!data || !data.bestStrategy) { throw new Error('Empty response from server. Check Render backend logs.'); }
       setResult(data);
       setPage('results');
-      toast(`✅ Experiment complete! Winner: ${data.bestStrategy}`,'INFO');
+      toast(`✅ Experiment complete! Winner: ${data.bestStrategy} (${data.dockerMode||'SIMULATION'})`,'INFO');
+      if (data.dockerNote) toast(`ℹ️ ${data.dockerNote}`,'INFO');
     } catch(e) {
       clearInterval(progRef.current);
       const msg = (e.message||'').includes('fetch')
@@ -776,11 +780,23 @@ export default function App() {
                   <label style={{ display:'block', fontSize:'12px', color:'#94a3b8', fontWeight:700, marginBottom:'8px' }}>
                     🐳 Docker Image <span style={{ color:'#1e293b', fontWeight:400 }}>(optional — leave blank for instant simulation)</span>
                   </label>
-                  <input type="text" placeholder="e.g. nginx:alpine, redis:latest" value={dockerImg} onChange={e=>setDocker(e.target.value)}
-                    style={{ width:'100%', padding:'11px 14px', borderRadius:'10px', border:'1px solid #334155', background:'#080d1a', color:'#e2e8f0', fontSize:'13px', outline:'none', marginBottom:'18px', boxSizing:'border-box',
-                      transition:'border-color 0.2s' }}
-                    onFocus={e=>e.target.style.borderColor='#3b82f6'}
+                  {IS_RENDER && (
+                    <div style={{ background:'rgba(251,191,36,0.07)', border:'1px solid rgba(251,191,36,0.25)', borderRadius:'10px', padding:'10px 14px', marginBottom:'12px', display:'flex', gap:'8px', alignItems:'flex-start' }}>
+                      <span style={{ fontSize:'15px', flexShrink:0 }}>⚠️</span>
+                      <p style={{ fontSize:'12px', color:'#fcd34d', lineHeight:1.7 }}>
+                        <strong>Render Cloud:</strong> Docker daemon is not available on Render's free tier.
+                        Any image you enter will be <strong>ignored</strong> and the experiment runs in fast
+                        simulation mode automatically. Use <strong>localhost</strong> to test real Docker images.
+                      </p>
+                    </div>
+                  )}
+                  <input type="text" placeholder={IS_RENDER ? "Docker not available on Render — runs as simulation" : "e.g. nginx:alpine, redis:latest"} value={dockerImg} onChange={e=>setDocker(e.target.value)}
+                    style={{ width:'100%', padding:'11px 14px', borderRadius:'10px', border:'1px solid #334155', background:'#080d1a', color: IS_RENDER ? '#334155' : '#e2e8f0', fontSize:'13px', outline:'none', marginBottom:'18px', boxSizing:'border-box',
+                      transition:'border-color 0.2s', opacity: IS_RENDER ? 0.6 : 1 }}
+                    onFocus={e=>{ if(!IS_RENDER) e.target.style.borderColor='#3b82f6'; }}
                     onBlur={e=>e.target.style.borderColor='#334155'}/>
+
+
 
                   {loading && (
                     <div style={{ textAlign:'center', padding:'24px' }}>

@@ -23,33 +23,38 @@ public class ExperimentService {
 
     /** Full experiment — returns timeline data per step for charting */
     public Map<String, Object> runExperimentDetailed(List<String> strategyNames, String dockerImage) {
-        // Only use Docker if: image provided AND Docker daemon is actually available
-        boolean useDocker = dockerImage != null
-                && !dockerImage.trim().isEmpty()
-                && dockerOrchestrationService.isDockerAvailable();
+        // Safely check Docker availability — NEVER throw, always fall back to simulation
+        boolean useDocker = false;
+        boolean dockerRequested = dockerImage != null && !dockerImage.trim().isEmpty();
+        String dockerNote = null;
 
-        if (dockerImage != null && !dockerImage.trim().isEmpty() && !dockerOrchestrationService.isDockerAvailable()) {
-            log.warn("Docker image '{}' was requested but Docker is not available. Falling back to host-metrics simulation.", dockerImage);
-        }
-
-        if (useDocker) {
-            log.info("Starting Docker-based experiment with image: {}", dockerImage);
-            boolean pulled = dockerOrchestrationService.pullImage(dockerImage);
-            if (!pulled) {
-                log.error("Aborting experiment — image '{}' could not be pulled.", dockerImage);
-                return Map.of(
-                    "error",   "IMAGE_PULL_FAILED",
-                    "message", "Docker image '" + dockerImage + "' could not be pulled. " +
-                               "Check image name, network access, and Docker daemon status."
-                );
+        if (dockerRequested) {
+            try {
+                boolean available = dockerOrchestrationService.isDockerAvailable();
+                if (available) {
+                    log.info("Starting Docker-based experiment with image: {}", dockerImage);
+                    boolean pulled = dockerOrchestrationService.pullImage(dockerImage);
+                    if (pulled) {
+                        useDocker = true;
+                        selfHealingService.clearEvents();
+                    } else {
+                        dockerNote = "Docker image '" + dockerImage + "' could not be pulled — running simulation instead.";
+                        log.warn(dockerNote);
+                    }
+                } else {
+                    dockerNote = "Docker is not available in this environment — running simulation mode instead.";
+                    log.warn("Docker image '{}' requested but Docker daemon unavailable (Render/cloud env). Falling back to simulation.", dockerImage);
+                }
+            } catch (Exception dockerEx) {
+                dockerNote = "Docker unavailable (" + dockerEx.getClass().getSimpleName() + ") — running simulation mode instead.";
+                log.warn("Docker check failed — bypassing Docker and running simulation. Reason: {}", dockerEx.getMessage());
             }
-            selfHealingService.clearEvents();
         }
 
         // Arm the auto-healing engine for this experiment
         autoHealingEngine.startExperiment(dockerImage);
 
-        // Increase sample size to 30 for docker to allow time for containers to start/stop
+        // Use 10 samples for simulation (fast), 30 for real Docker
         int samples = useDocker ? 30 : 10;
         List<MonitoringService.Workload> wave = monitoringService.generateTrafficWave(samples);
 
@@ -111,6 +116,8 @@ public class ExperimentService {
         response.put("cpuTimeline",   cpuTimeline);
         response.put("memTimeline",   memTimeline);
         response.put("dockerImage",   dockerImage);
+        response.put("dockerMode",    useDocker ? "DOCKER" : "SIMULATION");
+        if (dockerNote != null) response.put("dockerNote", dockerNote);
 
         if (bestResult != null) {
             response.put("finalReplicas",       bestResult.get("finalReplicas"));
@@ -118,6 +125,7 @@ public class ExperimentService {
             response.put("scalingEvents",       bestResult.get("scalingEvents"));
         }
         return response;
+
     }
 
     private Map<String, Object> simulateStrategyDetailed(
